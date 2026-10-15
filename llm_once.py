@@ -46,8 +46,6 @@ def complete(snapshot, metrics=None, *, expected_plan=None, owner_home=None):
         raise RuntimeError('host model adapter changed; revalidation required')
     raw_model = load_config_readonly().get('model', {})
     configured = raw_model if isinstance(raw_model, dict) else {'default': raw_model}
-    if configured.get('base_url'):
-        raise ValueError('custom endpoint requires explicit adapter revalidation')
     current = prediction_plan()
     if expected_plan is not None and route_identity(current) != route_identity(expected_plan):
         raise ValueError('Prediction settings changed before dispatch')
@@ -56,6 +54,16 @@ def complete(snapshot, metrics=None, *, expected_plan=None, owner_home=None):
     if not route:
         raise ValueError(plan['reason'])
     provider, model = route['provider'], route['model']
+    from hermes_cli.auth import PROVIDER_REGISTRY
+    aliases = {'openai': 'openai-api', 'google': 'gemini'}
+    main_provider = configured.get('provider') or ''
+    main_provider = aliases.get(main_provider, main_provider)
+    prediction_provider = aliases.get(provider, provider)
+    # A known, different main provider cannot veto an independently selected route.
+    # Same-provider or ambiguous custom endpoints still require revalidation; the
+    # prepared prediction destination below must still match its official registry.
+    if configured.get('base_url') and (main_provider not in PROVIDER_REGISTRY or main_provider == prediction_provider):
+        raise ValueError('custom endpoint requires explicit adapter revalidation')
     reasoning = {'enabled': True, 'effort': PREDICTION_EFFORT}
     messages = [
         {'role': 'system', 'content': Path(__file__).with_name('prediction.txt').read_text(encoding='utf-8')},
@@ -68,7 +76,6 @@ def complete(snapshot, metrics=None, *, expected_plan=None, owner_home=None):
         extra_body=None, reasoning_config=reasoning,
         extra_headers=None, api_mode=None, route_info=None,
     )
-    from hermes_cli.auth import PROVIDER_REGISTRY
     registry = PROVIDER_REGISTRY.get({'openai': 'openai-api', 'google': 'gemini'}.get(provider, provider))
     expected_url = registry.inference_base_url.rstrip('/') if registry else ''
     urls = [str(getattr(request.client, 'base_url', '') or ''), str(request.base_info or ''), str(request.resolved_base_url or '')]
