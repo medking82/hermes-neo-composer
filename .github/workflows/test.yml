@@ -10,8 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Controller behavior
-        run: node --test plugin/controller.test.mjs
+      - name: Controller behavior and registration surface
+        run: node --test plugin/controller.test.mjs plugin/registration.test.mjs
+      - name: Registration surface (async module.register path)
+        env:
+          NEO_REGISTRATION_ASYNC_HOOKS: '1'
+        run: node --test plugin/registration.test.mjs
       - name: Deterministic SDK bundle
         run: |
           python3 build-plugin.py

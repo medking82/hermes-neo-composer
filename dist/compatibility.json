@@ -1,9 +1,9 @@
 {
   "id": "neo-next-prompt",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "composer_protocol": 2,
   "supported_host_heads": [
     "297552a9d646119871391d202509822cd86330df"
   ],
-  "plugin_sha256": "a240c2e25c317623210b21cb1fd69672a57c2553213e3f738c58665512d4666f"
+  "plugin_sha256": "3265ab8dcf9f1b9d6c6723176b7c051f5d1dba7e2862566bd0d9d4c5ad822195"
 }

@@ -162,11 +162,18 @@ const Settings = createSettingsView({ jsx, useEffect, useRef, useState, Button, 
 export default {
   id: 'neo-next-prompt',
   name: 'Neo Composer',
-  version: '0.4.0',
+  version: '0.4.1',
   defaultEnabled: true,
   register(ctx) {
-    ctx.register({ id: 'settings', area: ROUTES_AREA, data: { path: '/neo-composer' }, render: () => jsx(Settings, { ctx }) })
-    ctx.register({ id: 'settings-nav', area: SIDEBAR_NAV_AREA, data: { path: '/neo-composer', label: 'Neo Composer', codicon: 'settings-gear' } })
+    if (typeof ctx.registerSettingsPage === 'function') {
+      // Settings live in Settings ▸ Plugins (the host's unified plugin home); no sidebar row of its own.
+      ctx.registerSettingsPage({ id: 'settings', title: 'Neo Composer', icon: 'settings-gear', render: () => jsx(Settings, { ctx }) })
+    } else {
+      // Hosts without the unified settings surface keep the legacy page + sidebar row,
+      // so the prediction settings stay reachable instead of silently disappearing.
+      ctx.register({ id: 'settings', area: ROUTES_AREA, data: { path: '/neo-composer' }, render: () => jsx(Settings, { ctx }) })
+      ctx.register({ id: 'settings-nav', area: SIDEBAR_NAV_AREA, data: { path: '/neo-composer', label: 'Neo Composer', codicon: 'settings-gear' } })
+    }
     if (host.composer?.behaviorVersion !== 2) {
       ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Neo Composer requires composer behavior interface v2. No host files were changed.', children: 'Neo Composer · incompatible host' }) })
       host.notify({ kind: 'error', message: 'Neo Composer is disabled on this host. Install a compatible interface; no core files were changed by the plugin.' })

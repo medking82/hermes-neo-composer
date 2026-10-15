@@ -16,7 +16,7 @@ A standalone Hermes Desktop plugin for persistent, session-bound ghost-text sugg
 
 ## Prediction settings
 
-Open **Neo Composer** in the sidebar. Prediction is **off by default** and no provider is pre-approved. Enable only providers you already use, then choose automatic selection or an explicit model.
+Open **Settings ▸ Plugins → Neo Composer**. On hosts that predate the unified plugin settings surface, the plugin keeps its previous sidebar entry as a fallback so the settings stay reachable. Prediction is **off by default** and no provider is pre-approved. Enable only providers you already use, then choose automatic selection or an explicit model.
 
 Automatic selection ranks eligible, account-bound text models by comparable verified API prices. It does not treat subscriptions as free or compare subscription quotas with API dollars. If comparable pricing is unavailable, it uses only your explicitly chosen low-cost fallback; otherwise prediction remains off with an explanation. An explicit model never silently falls back. Catalog metadata is read-only and must be fresh; refresh models in Hermes itself when necessary. Availability metadata is not an inference guarantee.
 

@@ -22,7 +22,7 @@ for name in ['controller.mjs', 'settings.mjs']:
 text = '\n'.join(imports + modules + body) + '\n'
 out = BASE / 'dist'; out.mkdir(exist_ok=True)
 (out / 'plugin.js').write_text(text)
-manifest = {'id': 'neo-next-prompt', 'version': '0.4.0', 'composer_protocol': 2,
+manifest = {'id': 'neo-next-prompt', 'version': '0.4.1', 'composer_protocol': 2,
             'supported_host_heads': ['297552a9d646119871391d202509822cd86330df'],
             'plugin_sha256': hashlib.sha256(text.encode()).hexdigest()}
 (out / 'compatibility.json').write_text(json.dumps(manifest, indent=2))
