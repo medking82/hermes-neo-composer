@@ -1,0 +1,18 @@
+{
+  "host_head": "297552a9d646119871391d202509822cd86330df",
+  "auxiliary_client_sha256": "1b0a5da07f8c90152110ba2e77f413f204f6a6f6fe2971ad115cfd8acfb59fa0",
+  "pins": {
+    "agent/anthropic_credentials.py": "caedbc2e4f832c7147db540d8a1395b96dca7e201cbfec2cb30f8d335de0ee1e",
+    "hermes_constants.py": "8d55a41452b625061f1f2e2f507a7e7ffb2a396e711afcc7aee28b03a6e8fa9d",
+    "hermes_cli/auth.py": "d66c7c7f53266d679970119d5db09be7145e115818991d667f7b5c1b13375705",
+    "hermes_cli/codex_models.py": "701e5aa665fac59c17e31aa33bef9bf225fef128ddf5b6cbf8419282f861b217",
+    "hermes_cli/models.py": "d6324ede1d2129a403af50dbcf0055d19e4f8e5a6d867e14e3fca4f38db79472",
+    "hermes_cli/model_switch_providers.py": "462ecb18bd015dc6dd5e48990e2248d07d2200c61610f887f81afc450208ea0d",
+    "agent/models_dev.py": "92bab26726beae0259989c75316167134b0f67a243a5faa4a29c5f6e4ac9f30d",
+    "agent/auxiliary_client.py": "1b0a5da07f8c90152110ba2e77f413f204f6a6f6fe2971ad115cfd8acfb59fa0",
+    "tui_gateway/server.py": "ced7eefae39a290693cd6e8c53b7a3595638108080b1e753828388566d278b8b",
+    "tui_gateway/ws.py": "be0e3e252b1d42bba36454ee28f026766876ffe468b742168bb10af656ce41ab",
+    "tui_gateway/methods_session_interrupt.py": "e327de782c891ab9da2295bb8526bb903d591b60ec9068f47f91b6c315ff901f",
+    "hermes_cli/web_server_dashboard.py": "372a71514ce35fa2555823a1a50f328e6253b6371137cb2f59aa802017f8daae"
+  }
+}

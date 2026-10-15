@@ -1,0 +1,21 @@
+name: Plugin checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Controller behavior
+        run: node --test plugin/controller.test.mjs
+      - name: Deterministic SDK bundle
+        run: |
+          python3 build-plugin.py
+          cmp dist/plugin.js desktop/plugin.js
+          git diff --exit-code -- dist/
+      - name: Python syntax (not backend integration)
+        run: python3 -m compileall -q .
