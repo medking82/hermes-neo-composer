@@ -60,9 +60,17 @@ def complete(snapshot, metrics=None, *, expected_plan=None, owner_home=None):
     main_provider = aliases.get(main_provider, main_provider)
     prediction_provider = aliases.get(provider, provider)
     # A known, different main provider cannot veto an independently selected route.
-    # Same-provider or ambiguous custom endpoints still require revalidation; the
-    # prepared prediction destination below must still match its official registry.
-    if configured.get('base_url') and (main_provider not in PROVIDER_REGISTRY or main_provider == prediction_provider):
+    # A same-provider or unknown-provider custom endpoint still requires revalidation;
+    # a configured base_url that already matches the main provider's official registry
+    # inference URL is the normal default, not a custom destination. The prepared
+    # prediction destination below must still match its official registry.
+    main_registry = PROVIDER_REGISTRY.get(main_provider)
+    official_main_url = (main_registry.inference_base_url or '').rstrip('/') if main_registry else ''
+    configured_base = configured.get('base_url')
+    main_base_url = configured_base.rstrip('/') if isinstance(configured_base, str) and configured_base else ''
+    if main_base_url and (main_provider not in PROVIDER_REGISTRY
+                          or (main_provider == prediction_provider
+                              and (not official_main_url or main_base_url != official_main_url))):
         raise ValueError('custom endpoint requires explicit adapter revalidation')
     reasoning = {'enabled': True, 'effort': PREDICTION_EFFORT}
     messages = [

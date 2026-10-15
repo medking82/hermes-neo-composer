@@ -38,7 +38,10 @@ export function profileLifecycle(storage,event) {
 }
 export function createController(env,storage) {
   const c=env.context,key=keyFor(c),timers=new Set()
-  let disposed=false,expired=false,started=false,settledSeen=false,inFlight=false,catchUpPending=false,row=null,state={enabled:false,empty:false}
+  // Backend re-asks a cached empty result only after 600s; arm the retry a
+  // little past that gate so one request lands in the re-ask window.
+  const EMPTY_RETRY_MS=610000
+  let disposed=false,expired=false,started=false,settledSeen=false,inFlight=false,catchUpPending=false,row=null,state={enabled:false,empty:false},retryTimer=null
   const visible=()=>!disposed&&!expired&&!c.busy&&state.enabled&&state.empty&&validRow(row) ? row.text : null
   const publish=()=>env.publish(visible())
   const decision=(candidate,status)=>({root:candidate.root,version:candidate.version,request_id:candidate.request_id,status})
@@ -48,6 +51,17 @@ export function createController(env,storage) {
     // A transport timeout is not an Esc gesture. Persist the terminal local
     // outcome, without fabricating a user decision on the backend.
     try {remember(storage,key,decision(candidate,'timeout'))} catch {}
+  }
+  const cancelRetry=()=>{if(retryTimer){clearTimeout(retryTimer);timers.delete(retryTimer);retryTimer=null}}
+  const armRetry=()=>{
+    if(retryTimer||disposed||expired) return
+    retryTimer=setTimeout(()=>{
+      timers.delete(retryTimer);retryTimer=null
+      if(disposed||expired||c.busy||!state.enabled||!state.empty||row||inFlight) return
+      started=false
+      start()
+    },EMPTY_RETRY_MS)
+    timers.add(retryTimer)
   }
   const start=()=>{
     if(disposed||expired||started||inFlight||c.busy||!state.enabled||!state.empty||!c.sessionId||!c.storedId) return
@@ -60,12 +74,22 @@ export function createController(env,storage) {
       if(expired){consumeLate(result.candidate);return}
       if(disposed) return
       const candidate=result.candidate
-      if(!validRow(candidate)||candidate.root!==c.storedId) return
+      if(!validRow(candidate)||candidate.root!==c.storedId){
+        // A null/empty result re-asks itself once the backend's empty-retry
+        // window is open, unless this version already has a user decision.
+        const settled=ledger(storage)[key]
+        const decided=candidate && typeof candidate==='object'
+          && settled?.version===candidate.version && settled.request_id===candidate.request_id
+        if(decided) return
+        armRetry()
+        return
+      }
       const handled=ledger(storage)[key]
       if(handled?.version===candidate.version && handled.request_id===candidate.request_id) {
         if(['consumed','dismissed'].includes(handled.status)) acknowledge(handled)
         return
       }
+      cancelRetry()
       row=candidate;publish()
     }).catch(()=>{clearTimeout(timer);timers.delete(timer)}).finally(()=>{
       inFlight=false

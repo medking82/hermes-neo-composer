@@ -49,6 +49,45 @@ class PromptTests(unittest.TestCase):
         self.assertFalse(self.store.finish(old, 'ready', '旧建议'))
         self.assertFalse(self.store.decide(old['root'], old['version'], old['request_id'], 'dismissed'))
 
+    def test_stale_empty_result_regenerates_after_retry_window(self):
+        import time
+        from unittest.mock import patch
+        snap = read_snapshot(self.home, 's', 's')
+        row, claimed = self.store.claim(snap)
+        self.assertTrue(claimed)
+        self.assertTrue(self.store.finish(row, 'empty'))
+        with patch('package.prompt_core.time.time', return_value=time.time() + 700):
+            again, retry = self.store.claim(snap)
+        self.assertTrue(retry, 'stale empty result must regenerate')
+        self.assertEqual(again['status'], 'pending')
+        self.assertNotEqual(again['request_id'], row['request_id'])
+        self.assertFalse(self.store.finish(row, 'ready', '旧建议'))
+
+    def test_fresh_empty_result_stays_cached(self):
+        snap = read_snapshot(self.home, 's', 's')
+        row, claimed = self.store.claim(snap)
+        self.assertTrue(claimed)
+        self.assertTrue(self.store.finish(row, 'empty'))
+        again, retry = self.store.claim(snap)
+        self.assertFalse(retry)
+        self.assertEqual(again['status'], 'empty')
+
+    def test_ready_and_consumed_never_regenerate(self):
+        import time
+        from unittest.mock import patch
+        snap = read_snapshot(self.home, 's', 's')
+        row, _ = self.store.claim(snap)
+        self.assertTrue(self.store.finish(row, 'ready', '运行回归测试'))
+        with patch('package.prompt_core.time.time', return_value=time.time() + 7200):
+            again, retry = self.store.claim(snap)
+        self.assertFalse(retry)
+        self.assertEqual(again['status'], 'ready')
+        self.assertTrue(self.store.decide(again['root'], again['version'], again['request_id'], 'consumed'))
+        with patch('package.prompt_core.time.time', return_value=time.time() + 14400):
+            after, retry = self.store.claim(snap)
+        self.assertFalse(retry)
+        self.assertEqual(after['status'], 'consumed')
+
     def test_duplicate_requests_and_timeout_do_not_regenerate(self):
         snap = read_snapshot(self.home, 's', 's')
         row, claimed = self.store.claim(snap)

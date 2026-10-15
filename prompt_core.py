@@ -11,6 +11,8 @@ from pathlib import Path
 
 CONTRACT = 'neo-next-prompt-v1'
 VALID_ID = re.compile(r'[A-Za-z0-9_:.-]{1,160}\Z')
+# A cached valid-null may be re-asked once this many seconds after it landed.
+EMPTY_RETRY_AFTER = 600
 
 
 def parse_suggestion(raw):
@@ -110,6 +112,14 @@ class PromptStore:
                 if row['status'] == 'pending' and time.time() - row['created'] > 35:
                     db.execute("UPDATE prompts_v2 SET status='timeout',text=NULL WHERE version=?", (snapshot['version'],))
                     row = db.execute('SELECT * FROM prompts_v2 WHERE version=?', (snapshot['version'],)).fetchone()
+                elif row['status'] == 'empty' and time.time() - row['created'] > EMPTY_RETRY_AFTER:
+                    # Same context, still empty: allow one bounded re-ask. The old
+                    # request id is rotated so a late finish cannot overwrite it.
+                    record = (row['root'], row['version'], uuid.uuid4().hex, 'pending', None, time.time(), row['session_id'])
+                    db.execute("UPDATE prompts_v2 SET request_id=?, status='pending', text=NULL, created=? WHERE version=? AND status='empty'",
+                               (record[2], record[5], snapshot['version']))
+                    row = db.execute('SELECT * FROM prompts_v2 WHERE version=?', (snapshot['version'],)).fetchone()
+                    return dict(row), True
                 return dict(row), False
             db.execute("UPDATE prompts_v2 SET status='stale',text=NULL WHERE session_id=? AND status='pending'", (snapshot['session_id'],))
             record = (snapshot['root'], snapshot['version'], uuid.uuid4().hex, 'pending', None, time.time(), snapshot['session_id'])

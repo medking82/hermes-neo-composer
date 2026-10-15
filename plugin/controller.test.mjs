@@ -47,6 +47,7 @@ test('blocked/busy/wrong-session/spoofed responses cannot publish',async()=>{
   g.controller.update({enabled:true,empty:true});await tick();assert.equal(g.published.at(-1),null)
   const spoof=fixture({request:async()=>({session_id:'runtime',stored_id:'stored',candidate:{root:'stored',version:'a'.repeat(64),request_id:'b'.repeat(32),status:'ready',text:'ab\u202ecd'}})})
   spoof.controller.update({enabled:true,empty:true});await tick();assert.equal(spoof.published.at(-1),null)
+  spoof.controller.dispose()
 })
 
 test('late result records timeout, never fabricates a user dismissal',async t=>{
@@ -70,4 +71,28 @@ test('settled during flight coalesces; one catchup only if the first result is e
   assert.equal(requests.length,2)
   finish({session_id:'runtime',stored_id:'stored',candidate:null});await tick();f.settled()
   assert.equal(requests.length,2);f.controller.dispose()
+})
+test('empty result arms a bounded ten-minute retry that re-requests once',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']})
+  const requests=[]
+  const f=fixture({request:(path,body)=>{requests.push({path,body});return Promise.resolve({session_id:'runtime',stored_id:'stored',candidate:null})}})
+  f.controller.update({enabled:true,empty:true});await tick()
+  assert.equal(requests.length,1)
+  t.mock.timers.tick(609999);await tick();assert.equal(requests.length,1,'no retry before the window')
+  t.mock.timers.tick(2);await tick();assert.equal(requests.length,2,'one retry after the window')
+  t.mock.timers.tick(610000);await tick();assert.equal(requests.length,3,'a still-empty retry re-arms the next window')
+  f.controller.dispose()
+})
+test('typing, a ready row, or dispose cancels the retry timer',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']})
+  const requests=[]
+  const f=fixture({request:(path,body)=>{requests.push({path,body});return Promise.resolve({session_id:'runtime',stored_id:'stored',candidate:null})}})
+  f.controller.update({enabled:true,empty:true});await tick()
+  f.controller.update({enabled:true,empty:false})
+  t.mock.timers.tick(610000);await tick();assert.equal(requests.length,1,'typing cancels the retry')
+  f.controller.dispose()
+  const g=fixture({request:(path,body)=>{requests.push({path,body});return Promise.resolve({session_id:'runtime',stored_id:'stored',candidate:null})}})
+  g.controller.update({enabled:true,empty:true});await tick()
+  g.controller.dispose()
+  t.mock.timers.tick(610000);await tick();assert.equal(requests.length,2,'dispose cancels the retry')
 })

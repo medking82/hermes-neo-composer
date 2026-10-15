@@ -82,9 +82,16 @@ def load_catalog():
         if registry is None:
             continue
         base_env = registry.base_url_env_var
+        # A configured model.base_url equal to this provider's official registry
+        # inference URL is the normal default, not a custom destination.
+        configured_base = model_config.get('base_url')
+        main_base_url = configured_base.rstrip('/') if isinstance(configured_base, str) and configured_base else ''
+        official_url = (registry.inference_base_url or '').rstrip('/')
+        custom_main_endpoint = (model_config.get('provider') == provider and bool(main_base_url)
+                                and (not official_url or main_base_url != official_url))
         if (isinstance(pcfg, dict) and (pcfg.get('enabled') is False or any(pcfg.get(k) for k in ('base_url', 'api', 'url', 'extra_headers')))
                 or (base_env and _env_secret(base_env))
-                or model_config.get('provider') == provider and model_config.get('base_url')):
+                or custom_main_endpoint):
             continue
         keys = [get_env_value_prefer_dotenv(name) for name in registry.api_key_env_vars if _env_secret(name)]
         key = keys[0] if keys else ''

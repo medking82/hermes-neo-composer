@@ -1,0 +1,1504 @@
+diff --git a/apps/desktop/src/app/chat/composer/busy-enter-keys.test.tsx b/apps/desktop/src/app/chat/composer/busy-enter-keys.test.tsx
+new file mode 100644
+index 0000000000..0bc2ddf5b1
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/busy-enter-keys.test.tsx
+@@ -0,0 +1,255 @@
++import { AssistantRuntimeProvider, type ThreadMessageLike, useExternalStoreRuntime } from '@assistant-ui/react'
++import { act, cleanup, fireEvent, render } from '@testing-library/react'
++import { MemoryRouter } from 'react-router'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++import { I18nProvider } from '@/i18n'
++import { clearSessionDraft, mainComposerScope } from '@/store/composer'
++import { clearQueuedPrompts, getQueuedPrompts } from '@/store/composer-queue'
++
++import { markActiveComposer } from './focus'
++import { RICH_INPUT_SLOT } from './rich-editor'
++import type { ChatBarProps, ChatBarState } from './types'
++
++import { ChatBar } from './index'
++
++vi.mock('@/app/session/hooks/use-busy-input-mode', () => ({ useBusyInputMode: () => 'interrupt' }))
++
++const SESSION = 'test-busy-enter-keys'
++
++let removeBehavior = () => {}
++beforeEach(() => {
++  removeBehavior = registry.register({
++    id: 'busy-key-fixture',
++    source: 'plugin:neo-next-prompt',
++    area: 'composer.behavior.v2',
++    data: {
++      protocol: 2,
++      create: () => ({}),
++      keyAction: (e: {
++        key: string
++        busy: boolean
++        ctrlKey?: boolean
++        metaKey?: boolean
++        altKey?: boolean
++        shiftKey?: boolean
++      }) =>
++        e.key === 'Enter' && e.busy && !e.shiftKey && !e.altKey
++          ? e.ctrlKey || e.metaKey
++            ? 'steer'
++            : 'queue'
++          : undefined
++    }
++  })
++})
++afterEach(() => removeBehavior())
++
++const state: ChatBarState = {
++  model: { canSwitch: false, model: '', provider: '' },
++  tools: { enabled: false, label: '' },
++  voice: { enabled: false, active: false }
++}
++
++function Harness(props: Partial<ChatBarProps>) {
++  const runtime = useExternalStoreRuntime({
++    convertMessage: (message: ThreadMessageLike) => message,
++    isRunning: props.busy ?? false,
++    messages: [] as ThreadMessageLike[],
++    onNew: async () => {}
++  })
++
++  return (
++    <AssistantRuntimeProvider runtime={runtime}>
++      <MemoryRouter>
++        <I18nProvider configClient={null} initialLocale="en">
++          <ChatBar
++            busy={true}
++            disabled={false}
++            gateway={null}
++            onCancel={vi.fn()}
++            onSubmit={vi.fn(async () => true)}
++            sessionId={SESSION}
++            state={state}
++            {...props}
++          />
++        </I18nProvider>
++      </MemoryRouter>
++    </AssistantRuntimeProvider>
++  )
++}
++
++function openComposer(props: Partial<ChatBarProps> = {}) {
++  const { container } = render(<Harness {...props} />)
++  const editor = container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++  editor.tabIndex = 0
++
++  return editor
++}
++
++async function pressEnter(editor: HTMLElement, text: string, modifiers: KeyboardEventInit & { keyCode?: number } = {}) {
++  await act(async () => {
++    editor.focus()
++    // Deliberately omit input: the real handler must use the latest DOM text,
++    // even when a fast keystroke precedes the composer state's next render.
++    editor.textContent = text
++    fireEvent.keyDown(editor, { key: 'Enter', ...modifiers })
++  })
++}
++
++afterEach(() => {
++  cleanup()
++  mainComposerScope.clear()
++  clearSessionDraft(SESSION)
++  clearQueuedPrompts(SESSION)
++})
++
++describe('busy composer Enter preference', () => {
++  it('restores native Enter steering when the plugin is disabled', async () => {
++    removeBehavior()
++    const onSteer = vi.fn(async () => true)
++    const editor = openComposer({ onSteer })
++    await pressEnter(editor, 'native steering')
++    expect(onSteer).toHaveBeenCalledExactlyOnceWith('native steering')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++  it('queues plain Enter without steering or stopping the running turn', async () => {
++    const onSteer = vi.fn(async () => true)
++    const onCancel = vi.fn()
++    const editor = openComposer({ onSteer, onCancel })
++
++    await pressEnter(editor, 'follow up later')
++
++    expect(getQueuedPrompts(SESSION).map(entry => entry.text)).toEqual(['follow up later'])
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onCancel).not.toHaveBeenCalled()
++  })
++
++  it('uses Ctrl+Enter to steer the running turn instead of queueing', async () => {
++    const onSteer = vi.fn(async () => true)
++    const editor = openComposer({ onSteer })
++
++    await pressEnter(editor, 'correct this now', { ctrlKey: true })
++
++    expect(onSteer).toHaveBeenCalledExactlyOnceWith('correct this now', 'steer')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it('shows the Ctrl+Enter steer hint while steerable with a payload', async () => {
++    const onSteer = vi.fn(async () => true)
++    const view = render(<Harness onSteer={onSteer} />)
++    const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++    editor.tabIndex = 0
++
++    await act(async () => {
++      editor.focus()
++      editor.textContent = 'draft text'
++      fireEvent.input(editor)
++    })
++
++    expect(view.container.querySelector('[data-slot="composer-steer-hint"]')).toBeTruthy()
++  })
++
++  it('hides the steer hint when idle', async () => {
++    const view = render(<Harness busy={false} />)
++    const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++    editor.tabIndex = 0
++
++    await act(async () => {
++      editor.focus()
++      editor.textContent = 'draft text'
++      fireEvent.input(editor)
++    })
++
++    expect(view.container.querySelector('[data-slot="composer-steer-hint"]')).toBeNull()
++  })
++
++  it('still sends plain Enter immediately while idle', async () => {
++    const onSubmit = vi.fn<ChatBarProps['onSubmit']>(async () => true)
++    const editor = openComposer({ busy: false, onSubmit })
++
++    await pressEnter(editor, 'send while idle')
++
++    expect(onSubmit).toHaveBeenCalledTimes(1)
++    expect(onSubmit.mock.calls[0]?.[0]).toBe('send while idle')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it('does not deliver the queue or stop on a second empty Enter', async () => {
++    const onSteer = vi.fn(async () => true)
++    const onCancel = vi.fn()
++    const editor = openComposer({ onSteer, onCancel })
++
++    await pressEnter(editor, 'wait for the current turn')
++    await pressEnter(editor, '')
++
++    expect(getQueuedPrompts(SESSION).map(entry => entry.text)).toEqual(['wait for the current turn'])
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onCancel).not.toHaveBeenCalled()
++  })
++
++  it.each([
++    { busy: false, shiftKey: true },
++    { busy: true, shiftKey: true },
++    { busy: true, isComposing: true },
++    { busy: true, keyCode: 229 },
++    { busy: true, disabled: true },
++    { busy: true, disabled: true, ctrlKey: true },
++    { busy: false, ctrlKey: true }
++  ])('does not send or queue for protected input %j', async ({ busy, disabled, ...modifiers }) => {
++    const onSteer = vi.fn(async () => true)
++    const onSubmit = vi.fn(async () => true)
++    const editor = openComposer({ busy, disabled, onSteer, onSubmit })
++
++    await pressEnter(editor, 'keep this draft', modifiers)
++
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onSubmit).not.toHaveBeenCalled()
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++    expect(editor.textContent).toBe('keep this draft')
++  })
++
++  it('keeps slash commands on their normal immediate path', async () => {
++    const onSubmit = vi.fn<ChatBarProps['onSubmit']>(async () => true)
++    const editor = openComposer({ onSubmit })
++
++    await pressEnter(editor, '/status')
++
++    expect(onSubmit).toHaveBeenCalledTimes(1)
++    expect(onSubmit.mock.calls[0]?.[0]).toBe('/status')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++})
++
++it('focus alone activates an inactive composer suggestion', async () => {
++  removeBehavior()
++  markActiveComposer('tile:other')
++  removeBehavior = registry.register({
++    id: 'focus-fixture',
++    source: 'plugin:neo-next-prompt',
++    area: 'composer.behavior.v2',
++    data: {
++      protocol: 2,
++      create: (env: { publish: (text: string | null) => void }) => ({
++        update: (state: { enabled: boolean; empty: boolean }) =>
++          env.publish(state.enabled && state.empty ? 'focus candidate' : null),
++        refresh: () => {},
++        decide: () => null,
++        dispose: () => {}
++      })
++    }
++  })
++  const gateway = { onEvent: () => () => {} } as never
++  const view = render(<Harness busy={false} gateway={gateway} />)
++  const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++  await act(async () => {
++    markActiveComposer('tile:other')
++    view.rerender(<Harness busy={false} gateway={gateway} state={{ ...state }} />)
++  })
++  expect(editor.getAttribute('data-next-prompt')).toBeNull()
++  await act(async () => {
++    fireEvent.focus(editor)
++  })
++  expect(editor.getAttribute('data-next-prompt')).toBe('ready')
++  markActiveComposer('main')
++})
+diff --git a/apps/desktop/src/app/chat/composer/controls.test.tsx b/apps/desktop/src/app/chat/composer/controls.test.tsx
+index 49724a29da..d27822888b 100644
+--- a/apps/desktop/src/app/chat/composer/controls.test.tsx
++++ b/apps/desktop/src/app/chat/composer/controls.test.tsx
+@@ -173,6 +173,18 @@ describe('ComposerControls shortcut tooltips', () => {
+     await expectShortcutTooltip('Queue message', 'Ctrl+↵')
+   })
+ 
++  it('shows the Enter queue + Ctrl+Enter steer pair in steer mode', async () => {
++    renderControls({ busy: true, busyAction: 'steer' })
++
++    fireEvent.pointerMove(screen.getByLabelText('Queue message'), { pointerType: 'mouse' })
++
++    const tooltip = await screen.findByRole('tooltip')
++
++    expect(tooltip.textContent).toContain('Queue message')
++    expect(tooltip.textContent).toContain('Steer')
++    expect(tooltip.textContent).toContain('↵')
++  })
++
+   it('hides Queue while idle even if the composer has a payload', () => {
+     renderControls({ busy: false, busyAction: 'queue', hasComposerPayload: true })
+ 
+diff --git a/apps/desktop/src/app/chat/composer/controls.tsx b/apps/desktop/src/app/chat/composer/controls.tsx
+index 851eb2ee35..234d180959 100644
+--- a/apps/desktop/src/app/chat/composer/controls.tsx
++++ b/apps/desktop/src/app/chat/composer/controls.tsx
+@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
+ 
+ import { Button } from '@/components/ui/button'
+ import { Codicon } from '@/components/ui/codicon'
++import { KbdCombo } from '@/components/ui/kbd'
+ import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+ import { useI18n } from '@/i18n'
+ import { triggerHaptic } from '@/lib/haptics'
+@@ -130,7 +131,23 @@ export function ComposerControls({
+         </>
+       )}
+       {showQueueButton ? (
+-        <Tip label={<TipKeybindLabel actionId="composer.queue" text={c.queueMessage} />} placement="control">
++        <Tip
++          label={
++            busyAction === 'steer' ? (
++              // Steer mode rebinds the keys: Enter queues, Ctrl+Enter steers.
++              // Advertise the pair instead of the native queue keybind alone.
++              <span className="flex items-center gap-1">
++                <KbdCombo combo="enter" size="sm" />
++                <span>{c.queueMessage}</span>
++                <KbdCombo combo="mod+enter" size="sm" />
++                <span>{c.steer}</span>
++              </span>
++            ) : (
++              <TipKeybindLabel actionId="composer.queue" text={c.queueMessage} />
++            )
++          }
++          placement="control"
++        >
+           <Button
+             aria-label={c.queueMessage}
+             className={GHOST_ICON_BTN}
+diff --git a/apps/desktop/src/app/chat/composer/focus.ts b/apps/desktop/src/app/chat/composer/focus.ts
+index 3c7f5a20da..70a678e28b 100644
+--- a/apps/desktop/src/app/chat/composer/focus.ts
++++ b/apps/desktop/src/app/chat/composer/focus.ts
+@@ -10,6 +10,8 @@
+  * steal focus from the composer effect.
+  */
+ 
++import { atom } from 'nanostores'
++
+ import { isElementInHiddenPane, queryAllVisible, queryVisible } from '@/components/pane-shell/pane-visibility'
+ import { $hoveredTreeGroup } from '@/components/pane-shell/tree/store'
+ import { subscribePreviewAnnotateHandoff } from '@/lib/preview-annotate/handoff'
+@@ -92,6 +94,7 @@ interface SubmitDetail {
+ }
+ 
+ let activeTarget: ComposerTarget = 'main'
++export const $activeComposerRevision = atom(0)
+ 
+ /**
+  * The chat surface currently on screen (`data-composer-target` hung off each
+@@ -231,7 +234,12 @@ const subscribe = <T>(name: string, handler: (detail: T) => void) => {
+ }
+ 
+ export const markActiveComposer = (target: ComposerTarget) => {
++  if (activeTarget === target) {
++    return
++  }
++
+   activeTarget = target
++  $activeComposerRevision.set($activeComposerRevision.get() + 1)
+ }
+ 
+ /** Hand the routing key back when a composer unmounts, so `'active'` can never
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.test.tsx b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.test.tsx
+new file mode 100644
+index 0000000000..865566a66e
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.test.tsx
+@@ -0,0 +1,101 @@
++import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++
++import { useComposerBehavior } from './use-composer-behavior'
++const api = vi.hoisted(() => vi.fn())
++vi.mock('@/api/client', () => ({
++  hermesApiAs: api,
++  resolveOwnerNow: ({ profile }: { profile?: string }) => ({ connectionId: 'ga401', profile: profile || 'default' })
++}))
++
++let dispose = () => {}
++
++const options = {
++  gateway: {},
++  profile: 'default',
++  sessionId: 'runtime',
++  storedId: 'stored',
++  busy: false,
++  enabled: true,
++  empty: true,
++  revision: 'model:high'
++}
++
++const install = (protocol = 2) => {
++  dispose = registry.register({
++    id: 'native-bridge-test',
++    source: 'plugin:neo-next-prompt',
++    area: 'composer.behavior.v2',
++    data: {
++      protocol,
++      create: (env: any) => {
++        let started = false
++
++        return {
++          update: (s: any) => {
++            if (s.enabled && s.empty && !started) {
++              started = true
++              void env.request('/suggestion', {}).then((r: any) => env.publish(r.text))
++            }
++          },
++          decide: () => '运行回归测试',
++          refresh: () => {},
++          dispose: () => {}
++        }
++      }
++    }
++  })
++}
++
++beforeEach(() => {
++  api.mockReset()
++  api.mockResolvedValue({ text: '运行回归测试' })
++  install()
++})
++afterEach(() => {
++  cleanup()
++  dispose()
++})
++describe('scoped plugin composer host', () => {
++  it('captures profile/connection and inserts no text automatically', async () => {
++    const v = renderHook(p => useComposerBehavior(p), { initialProps: options })
++    await waitFor(() => expect(v.result.current.text).toBe('运行回归测试'))
++    expect(api.mock.calls[0][0]).toEqual({ connectionId: 'ga401', profile: 'default' })
++    expect(api.mock.calls[0][1].path).toBe('/api/plugins/neo-next-prompt/suggestion')
++    v.rerender({ ...options, empty: false })
++    expect(v.result.current.text).toBeNull()
++    v.rerender(options)
++    expect(api).toHaveBeenCalledTimes(1)
++  })
++  it('drops an old scope result after changing profile', async () => {
++    let finish: (r: unknown) => void = () => {}
++    api.mockImplementationOnce(
++      () =>
++        new Promise(r => {
++          finish = r
++        })
++    )
++    const v = renderHook(p => useComposerBehavior(p), { initialProps: options })
++    v.rerender({ ...options, profile: 'other' })
++    await waitFor(() => expect(v.result.current.text).toBe('运行回归测试'))
++    await act(async () => finish({ text: '旧会话建议' }))
++    expect(v.result.current.text).toBe('运行回归测试')
++    expect(api.mock.calls[1][0].profile).toBe('other')
++  })
++  it('does not execute an incompatible provider or publish unsafe text', async () => {
++    dispose()
++    install(3)
++    const bad = renderHook(() => useComposerBehavior(options))
++    expect(api).not.toHaveBeenCalled()
++    expect(bad.result.current.text).toBeNull()
++    bad.unmount()
++    dispose()
++    install()
++    api.mockResolvedValue({ text: 'ab\u202ecd' })
++    const v = renderHook(() => useComposerBehavior(options))
++    await waitFor(() => expect(api).toHaveBeenCalledTimes(1))
++    expect(v.result.current.text).toBeNull()
++  })
++})
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.ts b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.ts
+new file mode 100644
+index 0000000000..a224061990
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.ts
+@@ -0,0 +1,194 @@
++import { useEffect, useMemo, useState } from 'react'
++
++import { hermesApiAs, resolveOwnerNow } from '@/api/client'
++import { useContributions } from '@/contrib/react/use-contributions'
++import {
++  type BehaviorController,
++  behaviorRequestPath,
++  COMPOSER_BEHAVIOR_AREA,
++  composerBehavior
++} from '@/store/composer-behavior'
++
++interface Options {
++  gateway: unknown
++  profile?: null | string
++  sessionId?: null | string
++  storedId?: null | string
++  busy: boolean
++  enabled: boolean
++  empty: boolean
++  revision: string
++}
++
++const validText = (text: unknown): text is string =>
++  typeof text === 'string' &&
++  text.trim() === text &&
++  text.length > 0 &&
++  Array.from(text).length <= 240 &&
++  !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(text)
++
++export function useComposerBehavior({
++  gateway,
++  profile,
++  sessionId,
++  storedId,
++  busy,
++  enabled,
++  empty,
++  revision
++}: Options) {
++  const contributions = useContributions(COMPOSER_BEHAVIOR_AREA)
++  const provider = useMemo(() => composerBehavior(contributions), [contributions])
++  const { connectionId, profile: resolvedProfile } = resolveOwnerNow({ profile })
++
++  const scope = useMemo(
++    () => ({
++      owner: { connectionId, profile: resolvedProfile },
++      gateway,
++      sessionId: sessionId || '',
++      storedId: storedId || sessionId || '',
++      busy,
++      revision
++    }),
++    [gateway, connectionId, resolvedProfile, sessionId, storedId, busy, revision]
++  )
++
++  // This is an owned controller lifetime, not a mirror of reactive app state.
++  const binding = useMemo(() => ({ scope, provider, controller: null as BehaviorController | null }), [scope, provider])
++  const [value, setValue] = useState<{ binding: typeof binding; text: string } | null>(null)
++
++  useEffect(() => {
++    if (!provider || !scope.gateway) {
++      return
++    }
++
++    let disposed = false
++    const subscriptions = new Set<() => void>()
++
++    const source = scope.gateway as {
++      onEvent?: (
++        fn: (event: { type: string; session_id?: string; payload?: { running?: boolean } }) => void
++      ) => () => void
++    }
++
++    try {
++      const controller = provider.data.create({
++        context: {
++          connectionId: scope.owner.connectionId || 'local',
++          profile: scope.owner.profile || 'default',
++          sessionId: scope.sessionId,
++          storedId: scope.storedId,
++          busy: scope.busy
++        },
++        publish: text => {
++          if (!disposed) {
++            setValue(validText(text) ? { binding, text } : null)
++          }
++        },
++        request: <T>(path: string, body: unknown) => {
++          if (disposed) {
++            return Promise.reject(new Error('Composer scope disposed'))
++          }
++
++          return hermesApiAs<T>(scope.owner, {
++            path: behaviorRequestPath(provider.source || '', path),
++            method: 'POST',
++            body,
++            timeoutMs: 32_000,
++            priority: undefined
++          })
++        },
++        onSettled: listener => {
++          const off =
++            source.onEvent?.(event => {
++              if (
++                !disposed &&
++                event.type === 'session.info' &&
++                event.session_id === scope.sessionId &&
++                event.payload?.running === false
++              ) {
++                listener()
++              }
++            }) || (() => {})
++
++          subscriptions.add(off)
++
++          return () => {
++            subscriptions.delete(off)
++            off()
++          }
++        }
++      })
++
++      if (
++        !controller ||
++        !['update', 'decide', 'refresh', 'dispose'].every(
++          key => typeof controller[key as keyof BehaviorController] === 'function'
++        )
++      ) {
++        throw new Error('Invalid composer controller')
++      }
++
++      binding.controller = controller
++    } catch {
++      disposed = true
++      setValue(null)
++
++      for (const off of subscriptions) {
++        off()
++      }
++
++      subscriptions.clear()
++    }
++
++    return () => {
++      disposed = true
++
++      try {
++        binding.controller?.dispose()
++      } catch {
++        /* Extension cleanup cannot break native input. */
++      }
++
++      binding.controller = null
++
++      for (const off of subscriptions) {
++        off()
++      }
++    }
++  }, [binding, scope, provider])
++
++  useEffect(() => {
++    try {
++      binding.controller?.update({ enabled, empty })
++    } catch {
++      setValue(null)
++    }
++  }, [binding, enabled, empty])
++
++  const text = value?.binding === binding && enabled && empty && !busy ? value.text : null
++
++  return {
++    text,
++    decide: (status: 'consumed' | 'dismissed'): null | string => {
++      if (!text || !binding.controller) {
++        return null
++      }
++
++      try {
++        const result = binding.controller.decide(status)
++
++        return result === text ? result : null
++      } catch {
++        return null
++      }
++    },
++    refresh: () => {
++      try {
++        binding.controller?.refresh()
++      } catch {
++        /* Optional extension only. */
++      }
++    }
++  }
++}
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts b/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
+index 73ad18fa96..84ff7d51d7 100644
+--- a/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
+@@ -405,7 +405,7 @@ export function useComposerSubmit({
+   // Redirect the live turn with a correction. The gateway either restarts the
+   // active model request with its displayed context or waits for the current
+   // tool boundary. If the turn already ended, queue the words instead.
+-  const steerDraft = () => {
++  const steerDraft = (mode?: 'steer') => {
+     const text = draftRef.current.trim()
+ 
+     // Guard on live editor state, not the render-lagged `canSteer`: a redirect
+@@ -450,7 +450,7 @@ export function useComposerSubmit({
+       }
+     }
+ 
+-    void Promise.resolve(onSteer(frozen.transportText))
++    void Promise.resolve(mode === 'steer' ? onSteer(frozen.transportText, mode) : onSteer(frozen.transportText))
+       .then(accepted => {
+         if (!accepted) {
+           keep()
+diff --git a/apps/desktop/src/app/chat/composer/index.tsx b/apps/desktop/src/app/chat/composer/index.tsx
+index 6cb55463b2..cb071a897c 100644
+--- a/apps/desktop/src/app/chat/composer/index.tsx
++++ b/apps/desktop/src/app/chat/composer/index.tsx
+@@ -20,13 +20,16 @@ import { Button } from '@/components/ui/button'
+ import { Slot as ContribSlot } from '@/contrib/react/slot'
+ import { useI18n } from '@/i18n'
+ import { chatMessageText } from '@/lib/chat-messages'
++import { isSlashCommandText } from '@/lib/chat-runtime'
+ import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
+ import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
+ import { triggerHaptic } from '@/lib/haptics'
+ import { isMacPlatform } from '@/lib/platform'
+ import { useStoreSelector, useStoresSelector } from '@/lib/use-session-slice'
+ import { cn } from '@/lib/utils'
++import { KbdCombo } from '@/components/ui/kbd'
+ import { sessionCompacting } from '@/store/compaction'
++import { behaviorKeyAction } from '@/store/composer-behavior'
+ import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
+ import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
+ import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
+@@ -35,7 +38,7 @@ import { $showsAdvancedChrome } from '@/store/interface-mode'
+ import { $chatOnboardingSolo } from '@/store/onboarding-intro'
+ import { sessionBlockingPrompt } from '@/store/prompts'
+ import { toggleReview } from '@/store/review'
+-import { $gatewayState } from '@/store/session'
++import { $currentReasoningEffortWire, $gatewayState } from '@/store/session'
+ import { $botChatSessionIds, $sessionStates, $sessionTiles, isBotChatSession } from '@/store/session-states'
+ import { useForcedTextDirection } from '@/store/text-direction'
+ import { $threadScrolledUpBySession } from '@/store/thread-scroll'
+@@ -58,10 +61,11 @@ import { COMPOSER_AREAS } from './contrib'
+ import { ComposerControls } from './controls'
+ import { ComposerDirectiveActions } from './directive-actions'
+ import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
+-import { markActiveComposer, onComposerAttachImagesRequest } from './focus'
++import { $activeComposerRevision, getActiveComposer, markActiveComposer, onComposerAttachImagesRequest } from './focus'
+ import { HelpHint } from './help-hint'
+ import { useAtCompletions } from './hooks/use-at-completions'
+ import { useCardWaitingSubmit } from './hooks/use-card-waiting-submit'
++import { useComposerBehavior } from './hooks/use-composer-behavior'
+ import { useComposerBranch } from './hooks/use-composer-branch'
+ import { useComposerDraft } from './hooks/use-composer-draft'
+ import { useComposerDrop } from './hooks/use-composer-drop'
+@@ -113,6 +117,7 @@ import {
+   resolveExactLinkPaste,
+   selectionLinkLabel
+ } from './url-refs'
++import { useComposerVisible } from './visibility'
+ import { VoiceActivity, VoicePlaybackActivity } from './voice-activity'
+ 
+ export function ChatBar({
+@@ -455,6 +460,31 @@ export function ChatBar({
+     triggerLoading
+   } = useComposerTrigger({ at, draftRef, editorRef, emoji, recordUndoPoint, requestMainFocus, setComposerText, slash })
+ 
++  const promptPaneVisible = useComposerVisible()
++  // Focus changes do not otherwise guarantee a render for empty composers.
++  useStore($activeComposerRevision)
++  const promptReasoning = useStore($currentReasoningEffortWire)
++
++  const nextPrompt = useComposerBehavior({
++    gateway,
++    profile,
++    sessionId,
++    storedId: queueSessionKey || sessionId,
++    busy,
++    empty: !hasComposerPayload,
++    revision: `${state.model.provider}:${state.model.model}:${promptReasoning}`,
++    enabled:
++      promptPaneVisible &&
++      getActiveComposer() === scope.target &&
++      !inputDisabled &&
++      !awaitingInput &&
++      !blockingPrompt &&
++      !cardWaiting &&
++      !queueEdit &&
++      queuedPrompts.length === 0 &&
++      !trigger
++  })
++
+   // Pull the live contentEditable text into draftRef + the AUI composer state
+   // (which drives `hasComposerPayload` → the send button). Shared by the input
+   // and compositionend paths so committed IME text reaches state through either.
+@@ -874,6 +904,40 @@ export function ChatBar({
+       }
+     }
+ 
++    // Ghost text is not a payload. Only an explicit, unmodified Tab can turn
++    // it into a draft, after IME and ordinary completion have had first refusal.
++    if (
++      !trigger &&
++      nextPrompt.text &&
++      !busy &&
++      !cardWaiting &&
++      !event.ctrlKey &&
++      !event.metaKey &&
++      !event.altKey &&
++      !event.shiftKey &&
++      liveComposerDraft(editorRef.current, draftRef.current).trim().length === 0 &&
++      attachments.length === 0
++    ) {
++      if (event.key === 'Tab' || event.key === 'Escape') {
++        const accepted = nextPrompt.decide(event.key === 'Tab' ? 'consumed' : 'dismissed')
++
++        if (accepted) {
++          event.preventDefault()
++          triggerKeyConsumedRef.current = true
++
++          if (event.key === 'Tab') {
++            withUndoPoint(() => {
++              loadIntoComposer(accepted, [])
++
++              return true
++            })
++          }
++
++          return
++        }
++      }
++    }
++
+     // ArrowUp/ArrowDown navigate, in priority order: the queue (edit entries in
+     // place) then sent-message history. The history ring is derived from live
+     // session messages each press — single source of truth, no mirror.
+@@ -946,14 +1010,56 @@ export function ChatBar({
+       return
+     }
+ 
+-    // Cmd/Ctrl+Enter queues a follow-up while a turn runs. Plain Enter steers
+-    // a text-only draft, so both live-turn actions stay reachable by keyboard.
+-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
++    const enterAction =
++      event.key === 'Enter' && !event.shiftKey
++        ? behaviorKeyAction({
++            key: event.key,
++            busy,
++            ctrlKey: event.ctrlKey,
++            metaKey: event.metaKey,
++            altKey: event.altKey,
++            shiftKey: event.shiftKey
++          })
++        : undefined
++
++    if (enterAction === 'steer') {
++      event.preventDefault()
++
++      if (disabled || inputDisabled || !busy) {
++        return
++      }
++
++      const editorText = liveComposerDraft(editorRef.current, draftRef.current)
++      draftRef.current = editorText
++      setComposerText(editorText)
++
++      // Cards and slash commands retain native arbitration. A normal draft
++      // explicitly requests session.steer, never the default interrupt mode.
++      if (cardWaiting || queueEdit || isSlashCommandText(editorText)) {
++        submitDraft()
++      } else {
++        steerDraft('steer')
++      }
++
++      return
++    }
++
++    // The extension chooses policy; the native composer owns live text,
++    // card/command arbitration and the actual queue/submit operation.
++    if (
++      event.key === 'Enter' &&
++      !event.shiftKey &&
++      (event.metaKey ||
++        event.ctrlKey ||
++        (enterAction === 'queue' &&
++          !event.altKey &&
++          !cardWaiting &&
++          !queueEdit &&
++          !isSlashCommandText(liveComposerDraft(editorRef.current, draftRef.current))))
++    ) {
+       event.preventDefault()
+ 
+       if (busy && !disabled) {
+-        // As with plain Enter, source the just-typed content from the DOM so a
+-        // fast keypress cannot queue a stale draft.
+         const editorText = liveComposerDraft(editorRef.current, draftRef.current)
+ 
+         if (editorText !== draftRef.current) {
+@@ -979,7 +1085,7 @@ export function ChatBar({
+       const editorText = liveComposerDraft(editorRef.current, draftRef.current)
+       const hasLivePayload = editorText.trim().length > 0 || attachments.length > 0
+ 
+-      if (disabled) {
++      if (disabled || (!busy && (event.metaKey || event.ctrlKey))) {
+         return
+       }
+ 
+@@ -989,8 +1095,8 @@ export function ChatBar({
+         return
+       }
+ 
+-      // Empty Enter while busy. With prompts queued this is the double-send:
+-      // the first Enter put the words in the queue, a second delivers them
++      // The native (extension-free) empty Enter delivers the queue head:
++      // the extension's queue/steer branches return before this fallback.
+       // now — steered into the live turn when a steer can carry them, else
+       // promote + interrupt + drain on settle — mirroring the idle empty-Enter
+       // drain above. With nothing queued it stays a no-op — interrupting is
+@@ -1156,7 +1262,8 @@ export function ChatBar({
+           hudNativeDrag && '[-webkit-app-region:no-drag]'
+         )}
+         contentEditable={!inputDisabled}
+-        data-placeholder={placeholder}
++        data-next-prompt={nextPrompt.text ? 'ready' : undefined}
++        data-placeholder={nextPrompt.text || placeholder}
+         data-slot={RICH_INPUT_SLOT}
+         dir={textDirection}
+         onBeforeInput={handleEditorBeforeInput}
+@@ -1200,7 +1307,10 @@ export function ChatBar({
+         onCut={handleCut}
+         onDragOver={handleInputDragOver}
+         onDrop={handleInputDrop}
+-        onFocus={() => markActiveComposer(scope.target)}
++        onFocus={() => {
++          markActiveComposer(scope.target)
++          nextPrompt.refresh()
++        }}
+         onInput={handleEditorInput}
+         onKeyDown={handleEditorKeyDown}
+         onKeyUp={handleEditorKeyUp}
+@@ -1210,6 +1320,7 @@ export function ChatBar({
+         role="textbox"
+         spellCheck={false}
+         suppressContentEditableWarning
++        title={nextPrompt.text ? `${nextPrompt.text} · Tab` : undefined}
+       />
+       <ComposerDirectiveActions editorRef={editorRef} />
+       {/* assistant-ui requires ComposerPrimitive.Input somewhere in the tree
+@@ -1546,6 +1657,19 @@ export function ChatBar({
+                       {controls}
+                     </div>
+                   </div>
++                  {/* Steer hint: the composer's own key contract, shown only
++                      while the keys actually mean this (busy, steerable, with
++                      a payload). The queue control's tooltip carries the same
++                      pair, so the hint here stays one line. */}
++                  {canSteer && hasComposerPayload && (
++                    <div
++                      className="flex items-center justify-end gap-1 text-[0.68rem] leading-none text-muted-foreground/70"
++                      data-slot="composer-steer-hint"
++                    >
++                      <KbdCombo combo="mod+enter" size="sm" />
++                      <span>{t.composer.steerKeyHint}</span>
++                    </div>
++                  )}
+                   <ContribSlot area={COMPOSER_AREAS.bottom} />
+                 </div>
+               </div>
+diff --git a/apps/desktop/src/app/chat/composer/next-prompt-keys.test.tsx b/apps/desktop/src/app/chat/composer/next-prompt-keys.test.tsx
+new file mode 100644
+index 0000000000..04f9e219cd
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/next-prompt-keys.test.tsx
+@@ -0,0 +1,115 @@
++import { AssistantRuntimeProvider, type ThreadMessageLike, useExternalStoreRuntime } from '@assistant-ui/react'
++import { act, cleanup, fireEvent, render } from '@testing-library/react'
++import { MemoryRouter } from 'react-router'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++import { I18nProvider } from '@/i18n'
++import { clearSessionDraft, mainComposerScope } from '@/store/composer'
++import { clearQueuedPrompts } from '@/store/composer-queue'
++
++import { RICH_INPUT_SLOT } from './rich-editor'
++import type { ChatBarProps, ChatBarState } from './types'
++
++const suggestion = vi.hoisted(() => ({
++  text: '运行解析器回归测试',
++  decide: vi.fn(() => '运行解析器回归测试'),
++  refresh: vi.fn()
++}))
++
++vi.mock('./hooks/use-composer-behavior', () => ({ useComposerBehavior: () => suggestion }))
++import { ChatBar } from './index'
++const SESSION = 'next-prompt-key-test'
++
++const state: ChatBarState = {
++  model: { canSwitch: false, model: '', provider: '' },
++  tools: { enabled: false, label: '' },
++  voice: { enabled: false, active: false }
++}
++
++function Harness({ onSubmit }: { onSubmit: ChatBarProps['onSubmit'] }) {
++  const runtime = useExternalStoreRuntime({
++    convertMessage: (m: ThreadMessageLike) => m,
++    isRunning: false,
++    messages: [] as ThreadMessageLike[],
++    onNew: async () => {}
++  })
++
++  return (
++    <AssistantRuntimeProvider runtime={runtime}>
++      <MemoryRouter>
++        <I18nProvider configClient={null} initialLocale="en">
++          <ChatBar
++            busy={false}
++            disabled={false}
++            gateway={null}
++            onCancel={vi.fn()}
++            onSubmit={onSubmit}
++            sessionId={SESSION}
++            state={state}
++          />
++        </I18nProvider>
++      </MemoryRouter>
++    </AssistantRuntimeProvider>
++  )
++}
++
++const open = () => {
++  const submit = vi.fn<ChatBarProps['onSubmit']>(async () => true)
++  const view = render(<Harness onSubmit={submit} />)
++  const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++  editor.tabIndex = 0
++  editor.focus()
++
++  return { editor, submit }
++}
++
++afterEach(() => {
++  cleanup()
++  mainComposerScope.clear()
++  clearSessionDraft(SESSION)
++  clearQueuedPrompts(SESSION)
++  vi.clearAllMocks()
++})
++
++describe('native next-prompt key ownership', () => {
++  it('keeps ghost text outside draft; Tab accepts, then Enter sends', async () => {
++    const { editor, submit } = open()
++    expect(editor.textContent).toBe('')
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Enter' })
++    })
++    expect(submit).not.toHaveBeenCalled()
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Tab' })
++    })
++    expect(editor.textContent).toBe(suggestion.text)
++    expect(submit).not.toHaveBeenCalled()
++    expect(suggestion.decide).toHaveBeenCalledWith('consumed')
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Enter' })
++    })
++    expect(submit).toHaveBeenCalledWith(suggestion.text, expect.anything())
++  })
++  it('does not overwrite a live keystroke before React has synchronized', async () => {
++    const { editor } = open()
++    editor.textContent = '我自己的输入'
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Tab' })
++    })
++    expect(editor.textContent).toBe('我自己的输入')
++    expect(suggestion.decide).not.toHaveBeenCalled()
++  })
++  it('yields to composition and Shift+Tab; Esc dismisses without stopping', async () => {
++    const { editor, submit } = open()
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Tab', isComposing: true })
++      fireEvent.keyDown(editor, { key: 'Tab', shiftKey: true })
++    })
++    expect(suggestion.decide).not.toHaveBeenCalled()
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Escape' })
++    })
++    expect(suggestion.decide).toHaveBeenCalledWith('dismissed')
++    expect(submit).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/desktop/src/app/chat/composer/types.ts b/apps/desktop/src/app/chat/composer/types.ts
+index 3a9aa50922..808ebac55d 100644
+--- a/apps/desktop/src/app/chat/composer/types.ts
++++ b/apps/desktop/src/app/chat/composer/types.ts
+@@ -61,7 +61,7 @@ export interface ChatBarProps {
+   onPickFolders?: () => void
+   onPickImages?: () => void
+   onRemoveAttachment?: (id: string) => void
+-  onSteer?: (text: string) => Promise<boolean> | boolean
++  onSteer?: (text: string, mode?: 'steer') => Promise<boolean> | boolean
+   /** Delivers a hidden note to the model mid-turn with no user turn (gateway session.steer). */
+   onSteerHidden?: (text: string) => Promise<boolean> | boolean
+   onSubmit: (value: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
+diff --git a/apps/desktop/src/app/chat/index.tsx b/apps/desktop/src/app/chat/index.tsx
+index 08ca23341c..acb9464e1d 100644
+--- a/apps/desktop/src/app/chat/index.tsx
++++ b/apps/desktop/src/app/chat/index.tsx
+@@ -113,7 +113,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
+   onPickFolders: () => void
+   onPickImages: () => void
+   onRemoveAttachment: (id: string) => void
+-  onSteer: (text: string) => Promise<boolean> | boolean
++  onSteer: (text: string, mode?: 'steer') => Promise<boolean> | boolean
+   onSteerHidden?: (text: string) => Promise<boolean> | boolean
+   onSubmit: (text: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
+   onThreadMessagesChange: (messages: readonly ThreadMessage[]) => void
+diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx b/apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx
+index a9d97def96..91c93113ea 100644
+--- a/apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx
++++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx
+@@ -2686,6 +2686,28 @@ describe('usePromptActions redirectPrompt', () => {
+     })
+   })
+ 
++  it('sends explicit composer steering through session.steer without an interrupt bubble', async () => {
++    const requestGateway = vi.fn(async () => ({ status: 'queued' }) as never)
++    let handle: HarnessHandle | null = null
++    const capturedStates: Record<string, unknown>[] = []
++    await actRender(
++      <Harness
++        onReady={h => (handle = h)}
++        onSeedState={state => capturedStates.push(state)}
++        refreshSessions={async () => undefined}
++        requestGateway={requestGateway}
++      />
++    )
++
++    expect(await handle!.steerPrompt('  steer safely  ', 'steer')).toBe(true)
++    expect(requestGateway).toHaveBeenCalledWith('session.steer', {
++      session_id: RUNTIME_SESSION_ID,
++      text: 'steer safely'
++    })
++    expect(requestGateway).not.toHaveBeenCalledWith('session.redirect', expect.anything())
++    expect(capturedStates).toEqual([])
++  })
++
+   it('reports rejection so the caller queues when the turn already ended', async () => {
+     const requestGateway = vi.fn(async () => ({ status: 'rejected' }) as never)
+ 
+diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts b/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+index ce687cfdf9..bf50f90a12 100644
+--- a/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
++++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+@@ -794,7 +794,7 @@ export function usePromptActions({
+   // completed work intact. During a tool it waits for the safe result boundary.
+   // Returns false when the turn raced to completion so the composer can queue.
+   const redirectPrompt = useCallback(
+-    async (rawText: string): Promise<boolean> => {
++    async (rawText: string, mode?: 'steer'): Promise<boolean> => {
+       const text = sanitizeComposerInput(rawText).trim()
+ 
+       // Ref, not the closure-captured prop — see cancelRun above. A redirect
+@@ -836,6 +836,17 @@ export function usePromptActions({
+       // message after the interrupted checkpoint, matching the durable core
+       // transcript rather than a system note that changes role after reload.
+       const send = async (id: string): Promise<boolean> => {
++        if (mode === 'steer') {
++          // Steering is injected at a safe tool boundary, not an interrupted
++          // user turn. Preserve the live stream and its durable transcript.
++          const result = await target.requestGateway<SessionRedirectResponse>('session.steer', {
++            session_id: id,
++            text
++          })
++
++          return result?.status === 'queued'
++        }
++
+         // Redirect aborts the model request, so the completion event can race
+         // its RPC response. Record the correction *before* awaiting the
+         // gateway, in arrival order: sealed already-streamed output above,
+diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx b/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx
+index 4692136712..05da656f38 100644
+--- a/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx
++++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx
+@@ -30,7 +30,7 @@ export interface HarnessHandle {
+   restoreToMessage: (messageId: string, target?: { text?: string; userOrdinal?: number | null }) => Promise<void>
+   redirectPrompt: (text: string) => Promise<boolean>
+   /** @deprecated Use `redirectPrompt`. */
+-  steerPrompt: (text: string) => Promise<boolean>
++  steerPrompt: (text: string, mode?: 'steer') => Promise<boolean>
+   submitTextRaw: (text: string, options?: SubmitTextOptions) => Promise<boolean>
+   submitText: (text: string, options?: SubmitTextOptions) => Promise<boolean>
+ }
+diff --git a/apps/desktop/src/i18n/de.ts b/apps/desktop/src/i18n/de.ts
+index c32d9d75f6..9d3fc22c82 100644
+--- a/apps/desktop/src/i18n/de.ts
++++ b/apps/desktop/src/i18n/de.ts
+@@ -3834,6 +3834,7 @@ export const deOverrides = {
+     openDirective: 'Öffnen',
+     queueMessage: 'Nachricht einreihen',
+     steer: 'Laufenden Lauf steuern',
++    steerKeyHint: 'Laufenden Lauf steuern (Ctrl+Enter)',
+     stop: 'Stopp',
+     send: 'Senden',
+     speaking: 'Spricht',
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index 6927122f52..83cc3312b8 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -3396,6 +3396,7 @@ export const en: Translations = {
+     openDirective: 'Open',
+     queueMessage: 'Queue message',
+     steer: 'Steer the current run',
++    steerKeyHint: 'Steer the running turn',
+     stop: 'Stop',
+     send: 'Send',
+     speaking: 'Speaking',
+diff --git a/apps/desktop/src/i18n/es.ts b/apps/desktop/src/i18n/es.ts
+index 51939f70e7..2e82a3a5d0 100644
+--- a/apps/desktop/src/i18n/es.ts
++++ b/apps/desktop/src/i18n/es.ts
+@@ -3828,6 +3828,7 @@ export const esOverrides = {
+     openDirective: 'Abrir',
+     queueMessage: 'Poner mensaje en cola',
+     steer: 'Guiar la ejecución actual',
++    steerKeyHint: 'Guiar la ejecución actual (Ctrl+Enter)',
+     stop: 'Detener',
+     send: 'Enviar',
+     speaking: 'Hablando',
+diff --git a/apps/desktop/src/i18n/fr.ts b/apps/desktop/src/i18n/fr.ts
+index 64dacb08b0..fab40ef212 100644
+--- a/apps/desktop/src/i18n/fr.ts
++++ b/apps/desktop/src/i18n/fr.ts
+@@ -3842,6 +3842,7 @@ export const frOverrides = {
+     openDirective: 'Ouvrir',
+     queueMessage: "Mettre le message en file d'attente",
+     steer: "Diriger l'exécution en cours",
++    steerKeyHint: "Diriger l'exécution en cours (Ctrl+Entrée)",
+     stop: 'Arrêter',
+     send: 'Envoyer',
+     speaking: 'Parle',
+diff --git a/apps/desktop/src/i18n/ja.ts b/apps/desktop/src/i18n/ja.ts
+index 12a58eb3ee..1e4730b9f3 100644
+--- a/apps/desktop/src/i18n/ja.ts
++++ b/apps/desktop/src/i18n/ja.ts
+@@ -2411,6 +2411,7 @@ export const jaOverrides = {
+     startVoice: '音声会話を開始',
+     openDirective: '開く',
+     queueMessage: 'メッセージをキューに入れる',
++    steerKeyHint: '実行中のターンを指示（Ctrl+Enter）',
+     stop: '停止',
+     send: '送信',
+     speaking: '話しています',
+diff --git a/apps/desktop/src/i18n/ru.ts b/apps/desktop/src/i18n/ru.ts
+index f2a9345b5a..68c5852607 100644
+--- a/apps/desktop/src/i18n/ru.ts
++++ b/apps/desktop/src/i18n/ru.ts
+@@ -2680,6 +2680,7 @@ export const ruOverrides = {
+     openDirective: 'Открыть',
+     queueMessage: 'Вставить сообщение в очередь',
+     steer: 'Направить текущий запуск',
++    steerKeyHint: 'Направить текущий запуск (Ctrl+Enter)',
+     stop: 'Стоп',
+     send: 'Отправить',
+     speaking: 'Говорит',
+diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
+index e8e7a110cd..7b295c2ea0 100644
+--- a/apps/desktop/src/i18n/types.ts
++++ b/apps/desktop/src/i18n/types.ts
+@@ -2964,6 +2964,7 @@ export interface Translations extends NoticeTranslations {
+     openDirective: string
+     queueMessage: string
+     steer: string
++    steerKeyHint: string
+     stop: string
+     send: string
+     speaking: string
+diff --git a/apps/desktop/src/i18n/zh.ts b/apps/desktop/src/i18n/zh.ts
+index d2db20444e..410542e164 100644
+--- a/apps/desktop/src/i18n/zh.ts
++++ b/apps/desktop/src/i18n/zh.ts
+@@ -3291,6 +3291,7 @@ export const zhOverrides = {
+     openDirective: '打开',
+     queueMessage: '排队消息',
+     steer: '引导当前运行',
++    steerKeyHint: '转向当前回合',
+     stop: '停止',
+     send: '发送',
+     speaking: '讲话中',
+diff --git a/apps/desktop/src/lib/keybinds/actions.ts b/apps/desktop/src/lib/keybinds/actions.ts
+index 97c0a666b9..fc5350183f 100644
+--- a/apps/desktop/src/lib/keybinds/actions.ts
++++ b/apps/desktop/src/lib/keybinds/actions.ts
+@@ -8,6 +8,7 @@
+ import { registry } from '@/contrib/registry'
+ import type { Contribution } from '@/contrib/types'
+ import { isMacPlatform } from '@/lib/platform'
++import { behaviorKeys } from '@/store/composer-behavior'
+ 
+ export type KeybindCategory = 'composer' | 'profiles' | 'session' | 'navigation' | 'view'
+ 
+@@ -348,8 +349,20 @@ export interface KeybindReadonly {
+ export const KEYBIND_READONLY: readonly KeybindReadonly[] = [
+   { id: 'composer.send', category: 'composer', keys: ['enter'] },
+   { id: 'composer.newline', category: 'composer', keys: ['shift+enter'] },
+-  { id: 'composer.steer', category: 'composer', keys: ['enter'] },
+-  { id: 'composer.queue', category: 'composer', keys: ['mod+enter'] },
++  {
++    id: 'composer.steer',
++    category: 'composer',
++    get keys() {
++      return behaviorKeys('composer.steer', ['enter'])
++    }
++  },
++  {
++    id: 'composer.queue',
++    category: 'composer',
++    get keys() {
++      return behaviorKeys('composer.queue', ['mod+enter'])
++    }
++  },
+   { id: 'composer.sendQueued', category: 'composer', keys: ['mod+shift+k'] },
+   { id: 'composer.mention', category: 'composer', keys: ['@'] },
+   { id: 'composer.slash', category: 'composer', keys: ['/'] },
+diff --git a/apps/desktop/src/sdk/composer.ts b/apps/desktop/src/sdk/composer.ts
+index 565db36838..6b8a004b51 100644
+--- a/apps/desktop/src/sdk/composer.ts
++++ b/apps/desktop/src/sdk/composer.ts
+@@ -8,6 +8,7 @@ import {
+   requestComposerSubmit
+ } from '@/app/chat/composer/focus'
+ import { freshDraftScope, takeSessionDraft } from '@/store/composer'
++import { COMPOSER_BEHAVIOR_VERSION } from '@/store/composer-behavior'
+ import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
+ import { $sessionStates } from '@/store/session-states'
+ 
+@@ -63,6 +64,7 @@ const resolveComposerAddress = (
+  *  resolves to no live surface returns `null`/`false` (or is dropped, for
+  *  `focus`) — it never broadcasts and never throws. */
+ export const composerHost = {
++  behaviorVersion: COMPOSER_BEHAVIOR_VERSION,
+   /** The live draft text of one composer, or null when nothing holds it.
+    *  Mounted surfaces answer with their in-DOM text (current, incl.
+    *  unsaved keystrokes); an unmounted session falls back to its debounced
+diff --git a/apps/desktop/src/store/composer-behavior.test.ts b/apps/desktop/src/store/composer-behavior.test.ts
+new file mode 100644
+index 0000000000..13c07a0e75
+--- /dev/null
++++ b/apps/desktop/src/store/composer-behavior.test.ts
+@@ -0,0 +1,58 @@
++import { afterEach, describe, expect, it } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++
++import {
++  behaviorKeyAction,
++  behaviorKeys,
++  behaviorRequestPath,
++  composerBehavior,
++  notifyBehaviorLifecycle
++} from './composer-behavior'
++const off: (() => void)[] = []
++
++const add = (data: unknown, source = 'plugin:neo-next-prompt') =>
++  off.push(registry.register({ id: `test-${off.length}`, source, area: 'composer.behavior.v2', data }))
++
++afterEach(() => {
++  while (off.length) {
++    off.pop()?.()
++  }
++})
++describe('minimal composer bridge contract', () => {
++  it('uses native behavior when absent, wrong protocol, ambiguous or provider throws', () => {
++    expect(composerBehavior()).toBeUndefined()
++    add({ protocol: 3, create: () => ({}) })
++    expect(composerBehavior()).toBeUndefined()
++    add({
++      protocol: 2,
++      create: () => ({}),
++      keyAction: () => {
++        throw Error('fixture')
++      }
++    })
++    expect(behaviorKeyAction({ key: 'Enter', busy: true })).toBeUndefined()
++    add({ protocol: 2, create: () => ({}) })
++    expect(composerBehavior()).toBeUndefined()
++  })
++  it('routes only validated actions and read-only key labels', () => {
++    add({ protocol: 2, create: () => ({}), keyAction: () => 'queue', readOnlyKeys: { 'composer.queue': ['enter'] } })
++    expect(behaviorKeyAction({ key: 'Enter', busy: true })).toBe('queue')
++    expect(behaviorKeys('composer.queue', ['mod+enter'])).toEqual(['enter'])
++  })
++  it('binds REST namespace to registry provenance and rejects escape/query paths', () => {
++    expect(behaviorRequestPath('plugin:neo-next-prompt', '/suggestion')).toBe('/api/plugins/neo-next-prompt/suggestion')
++
++    for (const path of ['/../config', '/%2e%2e/config', '/suggestion?profile=other', 'https://example.invalid']) {
++      expect(() => behaviorRequestPath('plugin:neo-next-prompt', path)).toThrow()
++    }
++
++    expect(() => behaviorRequestPath('core', '/suggestion')).toThrow()
++  })
++  it('delivers profile cleanup to the plugin instead of owning its storage', () => {
++    const events: unknown[] = []
++    add({ protocol: 2, create: () => ({}), lifecycle: (event: unknown) => events.push(event) })
++    notifyBehaviorLifecycle({ kind: 'drop', profile: 'default', connectionId: 'ga401' })
++    expect(events).toEqual([{ kind: 'drop', profile: 'default', connectionId: 'ga401' }])
++  })
++})
+diff --git a/apps/desktop/src/store/composer-behavior.ts b/apps/desktop/src/store/composer-behavior.ts
+new file mode 100644
+index 0000000000..7fbbbc834b
+--- /dev/null
++++ b/apps/desktop/src/store/composer-behavior.ts
+@@ -0,0 +1,87 @@
++import { registry } from '@/contrib/registry'
++import type { Contribution } from '@/contrib/types'
++
++export const COMPOSER_BEHAVIOR_VERSION = 2
++export const COMPOSER_BEHAVIOR_AREA = 'composer.behavior.v2'
++export interface BehaviorContext {
++  connectionId: string
++  profile: string
++  sessionId: string
++  storedId: string
++  busy: boolean
++}
++export interface BehaviorKey {
++  key: string
++  busy: boolean
++  ctrlKey?: boolean
++  metaKey?: boolean
++  altKey?: boolean
++  shiftKey?: boolean
++}
++export type BehaviorLifecycle =
++  { kind: 'drop'; profile: string; connectionId: string } | { kind: 'rename'; from: string; to: string }
++export interface BehaviorController {
++  update: (state: { enabled: boolean; empty: boolean }) => void
++  decide: (status: 'consumed' | 'dismissed') => null | string
++  refresh: () => void
++  dispose: () => void
++}
++export interface BehaviorEnvironment {
++  context: BehaviorContext
++  publish: (text: null | string) => void
++  request: <T>(path: string, body: unknown) => Promise<T>
++  onSettled: (listener: () => void) => () => void
++}
++export interface ComposerBehavior {
++  protocol: 2
++  create: (environment: BehaviorEnvironment) => BehaviorController
++  keyAction?: (event: BehaviorKey) => 'queue' | 'steer' | undefined
++  readOnlyKeys?: Record<string, readonly string[]>
++  lifecycle?: (event: BehaviorLifecycle) => void
++}
++
++export function composerBehavior(contributions: readonly Contribution[] = registry.getArea(COMPOSER_BEHAVIOR_AREA)) {
++  const providers = contributions.filter(item => {
++    const data = item.data as Partial<ComposerBehavior> | undefined
++
++    return (
++      /^plugin:[a-z0-9][a-z0-9_-]*$/.test(item.source || '') &&
++      data?.protocol === 2 &&
++      typeof data.create === 'function'
++    )
++  })
++
++  return providers.length === 1 ? (providers[0] as (typeof providers)[number] & { data: ComposerBehavior }) : undefined
++}
++
++export function behaviorRequestPath(source: string, path: string): string {
++  if (!/^plugin:[a-z0-9][a-z0-9_-]*$/.test(source) || !/^\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path)) {
++    throw new Error('Invalid composer extension namespace/path')
++  }
++
++  return `/api/plugins/${source.slice(7)}${path}`
++}
++
++export function behaviorKeyAction(event: BehaviorKey): 'queue' | 'steer' | undefined {
++  try {
++    const result = composerBehavior()?.data.keyAction?.(event)
++
++    return result === 'queue' || result === 'steer' ? result : undefined
++  } catch {
++    return undefined
++  }
++}
++
++export function behaviorKeys(id: string, fallback: readonly string[]): readonly string[] {
++  const keys = composerBehavior()?.data.readOnlyKeys?.[id]
++
++  return Array.isArray(keys) && keys.length > 0 && keys.every(key => typeof key === 'string') ? keys : fallback
++}
++
++export function notifyBehaviorLifecycle(event: BehaviorLifecycle): void {
++  try {
++    composerBehavior()?.data.lifecycle?.(event)
++  } catch {
++    /* A plugin cannot break native profile operations. */
++  }
++}
+diff --git a/apps/desktop/src/store/session-states.ts b/apps/desktop/src/store/session-states.ts
+index 3ec1898ecf..8309c11abc 100644
+--- a/apps/desktop/src/store/session-states.ts
++++ b/apps/desktop/src/store/session-states.ts
+@@ -40,6 +40,7 @@ import { stableArray } from '@/lib/stable-array'
+ import { readJson, writeJson } from '@/lib/storage'
+ import type { SessionInfo } from '@/types/hermes'
+ 
++import { notifyBehaviorLifecycle } from './composer-behavior'
+ import { dropStatusDrawersForProfile, migrateStatusDrawersForProfile } from './composer-status-drawer'
+ import { registryConnectionKind } from './connection-registry-state'
+ import { recordDislike } from './desktop-metrics'
+@@ -2810,6 +2811,11 @@ export function dropTilesForProfile(
+   // remotes whose tile key uses the URL fallback. Reuse the writer's resolved
+   // connection scope so deletion cannot erase same-named local tabs instead.
+   const ambientConnection = tileConnectionId || LOCAL_CONNECTION_ID
++  notifyBehaviorLifecycle({
++    kind: 'drop',
++    profile: routeTarget || routeProfile || name,
++    connectionId: route ? routeConnection : ambientConnection
++  })
+   const removedScope = backendScopeKey(route ? routeConnection : ambientConnection, routeProfile || name)
+ 
+   const ownerMatches = (owner: SessionProfileRoute | undefined): boolean => {
+@@ -2946,6 +2952,7 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string):
+   migrateSessionOwnerHintsForProfile(from, to)
+   migratePreviewArtifactsForProfile(from, to)
+   migrateStatusDrawersForProfile(from, to)
++  notifyBehaviorLifecycle({ kind: 'rename', from, to })
+   // Sibling family: the rail's profile-keyed buckets move with the rename, or
+   // the renamed profile opens with an empty rail and the old name keeps them.
+   migratePreviewTabsForProfile(from, to)
