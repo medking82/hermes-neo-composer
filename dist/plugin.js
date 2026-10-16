@@ -159,7 +159,7 @@ function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, 
       ] })
     ] }, name)
     return jsx('section', { 'aria-label': 'Neo Composer settings', style: { padding: 24, maxWidth: 720, color: 'var(--ui-text-primary)', display: 'grid', gap: 20 }, children: [
-      jsx('header', { children: [jsx('h2', { style: { fontSize: 20, fontWeight: 600 }, children: 'Prediction settings' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Neo Composer · suggestions stay drafts until you send them.' })] }),
+      jsx('header', { children: [jsx('h2', { style: { fontSize: 20, fontWeight: 600 }, children: 'Neo Composer' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Prediction settings · suggestions stay drafts until you send them.' })] }),
       !draft ? jsx('p', { role: 'status', children: busy ? 'Loading settings…' : 'No settings loaded.' }) : jsx('div', { style: { display: 'grid', gap: 20 }, children: [
         jsx('label', { style: { display: 'flex', alignItems: 'center', gap: 12 }, children: [jsx(Switch, { checked: draft.enabled, disabled: busy, 'aria-label': 'Ghost-text predictions', onCheckedChange: enabled => setDraft({ ...draft, enabled }) }), 'Ghost-text predictions'] }),
         jsx('fieldset', { children: [jsx('legend', { children: 'Approved providers' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Only these already-connected providers may receive a short conversation excerpt. No credentials or endpoints are added.' }),
@@ -186,7 +186,7 @@ const Settings = createSettingsView({ jsx, useEffect, useRef, useState, Button, 
 export default {
   id: 'neo-next-prompt',
   name: 'Neo Composer',
-  version: '0.4.3',
+  version: '0.4.4',
   defaultEnabled: true,
   register(ctx) {
     if (typeof ctx.registerSettingsPage === 'function') {
@@ -198,8 +198,8 @@ export default {
       ctx.register({ id: 'settings', area: ROUTES_AREA, data: { path: '/neo-composer' }, render: () => jsx(Settings, { ctx }) })
       ctx.register({ id: 'settings-nav', area: SIDEBAR_NAV_AREA, data: { path: '/neo-composer', label: 'Neo Composer', codicon: 'settings-gear' } })
     }
-    if (host.composer?.behaviorVersion !== 2) {
-      ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Neo Composer requires composer behavior interface v2. No host files were changed.', children: 'Neo Composer · incompatible host' }) })
+    if (host.composer?.behaviorVersion !== 2 || host.composer?.strictSteeringVersion !== 1) {
+      ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Neo Composer requires composer behavior v2 with strict steering v1. No host files were changed.', children: 'Neo Composer · incompatible host' }) })
       host.notify({ kind: 'error', message: 'Neo Composer is disabled on this host. Install a compatible interface; no core files were changed by the plugin.' })
       return
     }

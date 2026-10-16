@@ -2,7 +2,7 @@
 
 A standalone Hermes Desktop plugin for persistent, session-bound ghost-text suggestions and predictable busy-turn keys. The host retains native editing, focus and send ownership; model routing, settings and persistence live here.
 
-**Compatibility:** version **0.4.3** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
+**Compatibility:** uninstalled candidate **0.4.4** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
 
 ## Interaction
 
@@ -10,7 +10,9 @@ A standalone Hermes Desktop plugin for persistent, session-bound ghost-text sugg
 - **Tab** accepts it as an editable, undoable draft. It does not send.
 - **Esc** persistently dismisses that candidate/context.
 - **Enter** sends when idle and queues while busy.
-- **Ctrl+Enter** while busy uses real `session.steer`, not redirect or cancel/restart. While a steer is available the composer shows an explicit key hint (localized; the queue control advertises Enter+Ctrl+Enter together).
+- **Ctrl+Enter** while busy requests strict, text-only `session.steer`. It never falls back to redirect, interrupt or next-turn submission. Unsupported hosts, attachments, compression and ended turns retain the draft with an explicit notice.
+- “Waiting for safe-boundary delivery”, “Steering injected” and the next-turn queue are distinct states. The composer clears only the unchanged submitted draft after its matching delivery receipt—not after the RPC's buffer acknowledgement. A delivery receipt confirms insertion into the conversation, not that the model has read or acted on it. Disconnects and unconfirmed delivery retain the draft and do not automatically retry.
+- Images are not implemented for Steering in this release; their thumbnails and text remain intact. Prediction remains text-only and receives no attachment content.
 - **Shift+Enter** inserts a newline.
 - A cached empty prediction re-asks itself once after ten minutes on the next idle trigger; user decisions (Tab-accept, Esc) are never re-asked. Typing, attachments, IME and native completion UI retain priority. Refresh/reconnect does not intentionally repeat inference for the same persisted context.
 
@@ -30,7 +32,7 @@ Unbound legacy API-key catalog aliases, root-borrowed account identities, ambigu
 
 This repository is a unified agent-plugin package (`plugin.yaml`, Python backend and `desktop/plugin.js`). Install through Hermes' existing plugin flow, explicitly enable the backend and the Desktop half, and select prediction settings. On a split PC/backend installation, the Python package belongs on the backend host; the Desktop half belongs in that PC's resolved Desktop plugin directory. Never copy credentials between hosts.
 
-**Install the host seam separately first.** `host/v0.22.2.patch` is source for developers, not a force installer. It must apply cleanly to exact release `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, followed by the host's TypeScript checks, native composer tests and a real Windows renderer build. Check packaged executable, ASAR, main/preload and renderer provenance before replacing any installed renderer. The plugin itself never modifies core files.
+**Install the host seam separately first.** The fixed-release installers under `host/installer/` provide backend and Windows Desktop check/apply/rollback, with frozen preimages and verified backups. Follow [installation, uninstall and official upgrades](docs/install-uninstall.md). `host/v0.22.2-strict.patch` remains the developer source diff against exact release `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, not a force installer. The plugin itself never modifies core files; the host bundle never replaces the Electron executable, ASAR, main or preloads. Official upgrades remain owned by the official updater: uninstall the host patch first, upgrade normally, and only then use an explicitly compatible replacement bundle.
 
 Back up the previous package and renderer controls. Refuse unknown edits/version drift, preserve the existing Electron executable and main/preload, and retain a hash-bound rollback. The validated deployment uses per-machine private manifests; those contain local paths and are intentionally not published. Do not regenerate an install manifest against an unknown modified target. Disable the prediction setting before changing host versions. The current backend does not remount an already mounted Python API router: a controlled backend restart may be needed; reloading Desktop plugins alone does not prove backend activation.
 
@@ -48,7 +50,9 @@ python build-plugin.py
 
 `build-plugin.py` deterministically creates `dist/plugin.js`; copy the verified output to `desktop/plugin.js` when preparing a release. Its only runtime imports are the Hermes plugin SDK and the host's React.
 
-Validated scope: backend unit/integration contracts, native Desktop composer tests, TypeScript, repository checks, Windows build, idempotent install/rollback and foreign-edit refusal. The Windows browser fixture uses real Composer, prompt actions, `session.steer` handler and safe-boundary delivery; inference and tool execution are deterministic substitutes. A separate real subscription-backed prediction on synthetic input succeeded without changing main configuration; cache reuse is verified by deterministic service/browser tests. Those facts do not prove a particular user's currently open window has reloaded.
+The v0.4.3 validation record covers backend unit/integration contracts, native Desktop composer tests, TypeScript, repository checks, Windows build, idempotent install/rollback and foreign-edit refusal. Its browser fixture uses real Composer, prompt actions and steering handler; inference and tool execution are deterministic substitutes. A separate real subscription-backed prediction on synthetic input succeeded without changing main configuration; cache reuse was verified by deterministic service/browser tests.
+
+The v0.4.4 strict-Steering candidate has separate tests, safe-boundary receipts and a sealed Windows renderer build. It is not yet installed or live-window accepted. Its fixed-release installer has been exercised on an isolated official backend checkout and a copied Windows target; Desktop uninstall also removes this release's introduced renderer assets. Unknown dirty packaged shells are still refused unless their exact native fingerprints were independently verified and explicitly frozen. Do not override that check or treat v0.4.3 installation evidence as v0.4.4 live acceptance. Image Steering remains a reviewed design, not implemented functionality. See [the strict-Steering contract and image proposal](docs/strict-steering.md).
 
 ## Related work
 

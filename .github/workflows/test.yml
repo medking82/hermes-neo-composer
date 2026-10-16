@@ -10,12 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Match the tested installer runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
       - name: Controller behavior and registration surface
         run: node --test plugin/controller.test.mjs plugin/registration.test.mjs
       - name: Registration surface (async module.register path)
         env:
           NEO_REGISTRATION_ASYNC_HOOKS: '1'
         run: node --test plugin/registration.test.mjs
+      - name: Fixed-release installer safety
+        run: node --test host/installer/*.test.mjs
       - name: Deterministic SDK bundle
         run: |
           python3 build-plugin.py

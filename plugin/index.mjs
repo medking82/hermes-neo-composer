@@ -8,7 +8,7 @@ const Settings = createSettingsView({ jsx, useEffect, useRef, useState, Button, 
 export default {
   id: 'neo-next-prompt',
   name: 'Neo Composer',
-  version: '0.4.3',
+  version: '0.4.4',
   defaultEnabled: true,
   register(ctx) {
     if (typeof ctx.registerSettingsPage === 'function') {
@@ -20,8 +20,8 @@ export default {
       ctx.register({ id: 'settings', area: ROUTES_AREA, data: { path: '/neo-composer' }, render: () => jsx(Settings, { ctx }) })
       ctx.register({ id: 'settings-nav', area: SIDEBAR_NAV_AREA, data: { path: '/neo-composer', label: 'Neo Composer', codicon: 'settings-gear' } })
     }
-    if (host.composer?.behaviorVersion !== 2) {
-      ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Neo Composer requires composer behavior interface v2. No host files were changed.', children: 'Neo Composer · incompatible host' }) })
+    if (host.composer?.behaviorVersion !== 2 || host.composer?.strictSteeringVersion !== 1) {
+      ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Neo Composer requires composer behavior v2 with strict steering v1. No host files were changed.', children: 'Neo Composer · incompatible host' }) })
       host.notify({ kind: 'error', message: 'Neo Composer is disabled on this host. Install a compatible interface; no core files were changed by the plugin.' })
       return
     }

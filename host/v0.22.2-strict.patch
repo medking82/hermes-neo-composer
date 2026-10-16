@@ -1,0 +1,3606 @@
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index 15cd862855..4587400ef1 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -3738,23 +3738,6 @@ def extract_api_error_context(error: Exception) -> dict[str, Any]:
+     return context
+ 
+ 
+-def _requeue_pending_steer(agent, steer_text: str) -> None:
+-    """Put drained steer text back so the caller's fallback delivers it as a next-turn user message."""
+-    # Under the lock the slot is read directly: an initialized agent always has both attributes, so a
+-    # missing ``_pending_steer`` there is a real bug and must fail loud. The lock-less branch only
+-    # exists for test stubs built via ``object.__new__`` that skipped ``__init__``.
+-    _lock = getattr(agent, "_pending_steer_lock", None)
+-    if _lock is not None:
+-        with _lock:
+-            if agent._pending_steer:
+-                agent._pending_steer = agent._pending_steer + "\n" + steer_text
+-            else:
+-                agent._pending_steer = steer_text
+-    else:
+-        existing = getattr(agent, "_pending_steer", None)
+-        agent._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
+-
+-
+ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
+     """Persist any pending /steer text as a standalone user message.
+ 
+@@ -3777,19 +3760,18 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
+     """
+     if num_tool_msgs <= 0 or not messages:
+         return
+-    steer_text = agent._drain_pending_steer()
+-    if not steer_text:
+-        return
+     # Skip non-tool messages in the tail in case something else is appended at the boundary.
+     tail = range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
+     target = next((messages[j] for j in tail if isinstance(messages[j], dict) and messages[j].get("role") == "tool"), None)
+     if target is None:
+-        # No tool result in this batch (e.g. all skipped by interrupt);
+-        # requeue so the fallback path delivers it as a normal next-turn
+-        # user message (which persists like any other user turn).
+-        _requeue_pending_steer(agent, steer_text)
++        # Do not drain without a boundary: strict provenance must survive
++        # until delivery or explicit turn-end rejection.
++        return
++    steer_text = agent._drain_pending_steer()
++    if not steer_text:
+         return
+     messages.append(steer_user_row(steer_text))
++    getattr(agent, "commit_steer_delivery", lambda: None)()
+     _ra().logger.info(
+         "Delivered /steer to agent after tool batch (%d chars) as new user message: %s", len(steer_text),
+         steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
+diff --git a/agent/interrupt_control.py b/agent/interrupt_control.py
+index 06117c1c9a..8d584d9a34 100644
+--- a/agent/interrupt_control.py
++++ b/agent/interrupt_control.py
+@@ -260,18 +260,36 @@ class InterruptControlMixin:
+             # Hard stop only (see docstring). The comment that used to run unconditionally here
+             # claimed a hard interrupt supersedes the steer — but nothing gated this wipe on
+             # hard_cancel, so a soft clear dropped a live user message with no trace.
++            self.reject_pending_strict_steer()
+             with _ic_lock(self, "_pending_steer_lock"):
+                 self._pending_steer = None
++                self._pending_steer_entries = []
+         return True
+ 
+     def steer(self, text: str) -> bool:
+         """Queue user text for delivery as its own user row after the current tool batch finishes (no
+         interrupt); multiple calls concatenate with newlines. Returns False for empty text."""
++        return InterruptControlMixin._queue_steer(self, text)
++
++    def steer_strict(self, text: str, receipt) -> bool:
++        """Same safe boundary, but an undelivered item must never become a next turn."""
++        if _ic_codex_method(self, "request_steer") is not None:
++            return False  # native app-server has a different turn/steer lifecycle
++        return self._queue_steer(text, receipt)
++
++    def _queue_steer(self, text: str, receipt=None) -> bool:
+         if not text or not text.strip():
+             return False
+         cleaned = text.strip()
+         with _ic_lock(self, "_pending_steer_lock"):
++            if receipt is not None and getattr(self, "_strict_steer_closed", False):
++                return False
+             existing = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
++            entries = getattr(self, "_pending_steer_entries", [])
++            if existing != ("\n".join(item[0] for item in entries) or None):
++                entries = [(existing, None)] if existing else []
++            entries.append((cleaned, receipt))
++            self._pending_steer_entries = entries
+             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
+         # The turn no longer ran on its own (first-task-done detection reads this off the result).
+         self._turn_user_intervened = True
+@@ -352,9 +370,52 @@ class InterruptControlMixin:
+             self._pending_redirect = None
+         return text
+ 
+-    def _drain_pending_steer(self) -> Optional[str]:
++    def _drain_pending_steer(self, *, allow_strict: bool = True) -> Optional[str]:
+         """Return the pending steer text (if any) and clear the slot; None when nothing is pending."""
+         with _ic_lock(self, "_pending_steer_lock"):
++            entries = getattr(self, "_pending_steer_entries", [])
++            if not allow_strict and any(callback is not None for _, callback in entries):
++                return None  # keep mixed FIFO intact until an append-only boundary
+             text = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
+             self._pending_steer = None
++            if not entries and text:
++                entries = [(text, None)]
++            self._pending_steer_entries = []
++            self._drained_steer_entries = getattr(self, "_drained_steer_entries", []) + entries
+         return text
++
++    @staticmethod
++    def _notify_steer_receipts(callbacks, delivered: bool) -> None:
++        for callback in callbacks:
++            try:
++                callback(delivered)
++            except Exception:
++                logger.debug("Steering delivery receipt failed", exc_info=True)
++
++    def commit_steer_delivery(self) -> None:
++        """Only call after the new user row is appended to the active messages."""
++        with _ic_lock(self, "_pending_steer_lock"):
++            callbacks = [callback for _, callback in getattr(self, "_drained_steer_entries", []) if callback]
++            self._drained_steer_entries = []
++        self._notify_steer_receipts(callbacks, True)
++
++    def reject_pending_strict_steer(self) -> None:
++        """Turn end/stop: fail strict items; retain legacy leftovers in original order."""
++        with _ic_lock(self, "_pending_steer_lock"):
++            self._strict_steer_closed = True
++            entries = getattr(self, "_pending_steer_entries", [])
++            callbacks = [callback for _, callback in entries if callback]
++            callbacks += [callback for _, callback in getattr(self, "_drained_steer_entries", []) if callback]
++            self._drained_steer_entries = []
++            if entries:
++                legacy = [(text, callback) for text, callback in entries if callback is None]
++                self._pending_steer_entries = legacy
++                self._pending_steer = "\n".join(text for text, _ in legacy) or None
++        self._notify_steer_receipts(callbacks, False)
++
++    def open_strict_steering(self) -> None:
++        # Recovery after an exception must not carry an old strict item into a
++        # successor turn, even if that exception skipped normal finalization.
++        self.reject_pending_strict_steer()
++        with _ic_lock(self, "_pending_steer_lock"):
++            self._strict_steer_closed = False
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index fa61b311c9..ab755cc643 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -619,6 +619,7 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
+ 
+ def _reset_per_turn_agent_state(agent: Any) -> None:
+     """Reset retry counters, guardrails, iteration and run budgets at turn start."""
++    getattr(agent, "open_strict_steering", lambda: None)()
+     for name, value in _PER_TURN_RESET_STATE:
+         setattr(agent, name, value)
+     agent._turn_failed_file_mutations = {}
+diff --git a/agent/turn_finalizer.py b/agent/turn_finalizer.py
+index 9fd39ec52d..de2ffd2617 100644
+--- a/agent/turn_finalizer.py
++++ b/agent/turn_finalizer.py
+@@ -744,6 +744,7 @@ def finalize_turn(
+         result["cleanup_errors"] = _cleanup_errors
+     # A /steer landing after the final assistant turn has no tool batch to drain into;
+     # hand it back so it becomes the next user turn instead of being lost.
++    getattr(agent, "reject_pending_strict_steer", lambda: None)()
+     _leftover_steer = agent._drain_pending_steer()
+     if _leftover_steer:
+         result["pending_steer"] = _leftover_steer
+diff --git a/agent/turn_iteration_prep.py b/agent/turn_iteration_prep.py
+index e4a9df850c..5c30a9897b 100644
+--- a/agent/turn_iteration_prep.py
++++ b/agent/turn_iteration_prep.py
+@@ -176,7 +176,12 @@ def prepare_iteration(
+     # standalone user row after the newest tool result (never smeared onto the tool row: that
+     # row is already persisted append-only, so replay would diverge from the live request and
+     # break the prompt cache — same contract as apply_pending_steer_to_tool_results).
+-    _pre_api_steer = agent._drain_pending_steer()
++    # A historical tool result before the fresh user is NOT a strict boundary.
++    # Permit strict drain only when insertion is append-only at the current tail.
++    _pre_api_steer = agent._drain_pending_steer(
++        allow_strict=isinstance(messages[-1], dict) and messages[-1].get("role") == "tool",
++    ) if any(
++        isinstance(row, dict) and row.get("role") == "tool" for row in messages) else None
+     if _pre_api_steer:
+         _inject_steer_after_newest_tool_result(agent, messages, _pre_api_steer)
+ 
+@@ -289,9 +294,12 @@ def _inject_steer_after_newest_tool_result(agent: Any, messages: Any, steer_text
+         if isinstance(_sm, dict) and _sm.get("role") == "tool":
+             from agent.prompt_builder import steer_user_row
+             messages.insert(_si + 1, steer_user_row(steer_text))
++            commit = getattr(agent, "commit_steer_delivery", None)
++            if callable(commit):
++                commit()
+             logger.debug("Pre-API-call steer drain: appended user row after tool msg at index %d", _si)
+             return
+-    from agent.agent_runtime_helpers import _requeue_pending_steer
++    from agent.steer_requeue import _requeue_pending_steer
+     _requeue_pending_steer(agent, steer_text)
+ 
+ 
+diff --git a/apps/desktop/src/app/chat/composer/controls.test.tsx b/apps/desktop/src/app/chat/composer/controls.test.tsx
+index 49724a29da..d27822888b 100644
+--- a/apps/desktop/src/app/chat/composer/controls.test.tsx
++++ b/apps/desktop/src/app/chat/composer/controls.test.tsx
+@@ -173,6 +173,18 @@ describe('ComposerControls shortcut tooltips', () => {
+     await expectShortcutTooltip('Queue message', 'Ctrl+↵')
+   })
+ 
++  it('shows the Enter queue + Ctrl+Enter steer pair in steer mode', async () => {
++    renderControls({ busy: true, busyAction: 'steer' })
++
++    fireEvent.pointerMove(screen.getByLabelText('Queue message'), { pointerType: 'mouse' })
++
++    const tooltip = await screen.findByRole('tooltip')
++
++    expect(tooltip.textContent).toContain('Queue message')
++    expect(tooltip.textContent).toContain('Steer')
++    expect(tooltip.textContent).toContain('↵')
++  })
++
+   it('hides Queue while idle even if the composer has a payload', () => {
+     renderControls({ busy: false, busyAction: 'queue', hasComposerPayload: true })
+ 
+diff --git a/apps/desktop/src/app/chat/composer/controls.tsx b/apps/desktop/src/app/chat/composer/controls.tsx
+index 851eb2ee35..234d180959 100644
+--- a/apps/desktop/src/app/chat/composer/controls.tsx
++++ b/apps/desktop/src/app/chat/composer/controls.tsx
+@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
+ 
+ import { Button } from '@/components/ui/button'
+ import { Codicon } from '@/components/ui/codicon'
++import { KbdCombo } from '@/components/ui/kbd'
+ import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+ import { useI18n } from '@/i18n'
+ import { triggerHaptic } from '@/lib/haptics'
+@@ -130,7 +131,23 @@ export function ComposerControls({
+         </>
+       )}
+       {showQueueButton ? (
+-        <Tip label={<TipKeybindLabel actionId="composer.queue" text={c.queueMessage} />} placement="control">
++        <Tip
++          label={
++            busyAction === 'steer' ? (
++              // Steer mode rebinds the keys: Enter queues, Ctrl+Enter steers.
++              // Advertise the pair instead of the native queue keybind alone.
++              <span className="flex items-center gap-1">
++                <KbdCombo combo="enter" size="sm" />
++                <span>{c.queueMessage}</span>
++                <KbdCombo combo="mod+enter" size="sm" />
++                <span>{c.steer}</span>
++              </span>
++            ) : (
++              <TipKeybindLabel actionId="composer.queue" text={c.queueMessage} />
++            )
++          }
++          placement="control"
++        >
+           <Button
+             aria-label={c.queueMessage}
+             className={GHOST_ICON_BTN}
+diff --git a/apps/desktop/src/app/chat/composer/focus.ts b/apps/desktop/src/app/chat/composer/focus.ts
+index 3c7f5a20da..70a678e28b 100644
+--- a/apps/desktop/src/app/chat/composer/focus.ts
++++ b/apps/desktop/src/app/chat/composer/focus.ts
+@@ -10,6 +10,8 @@
+  * steal focus from the composer effect.
+  */
+ 
++import { atom } from 'nanostores'
++
+ import { isElementInHiddenPane, queryAllVisible, queryVisible } from '@/components/pane-shell/pane-visibility'
+ import { $hoveredTreeGroup } from '@/components/pane-shell/tree/store'
+ import { subscribePreviewAnnotateHandoff } from '@/lib/preview-annotate/handoff'
+@@ -92,6 +94,7 @@ interface SubmitDetail {
+ }
+ 
+ let activeTarget: ComposerTarget = 'main'
++export const $activeComposerRevision = atom(0)
+ 
+ /**
+  * The chat surface currently on screen (`data-composer-target` hung off each
+@@ -231,7 +234,12 @@ const subscribe = <T>(name: string, handler: (detail: T) => void) => {
+ }
+ 
+ export const markActiveComposer = (target: ComposerTarget) => {
++  if (activeTarget === target) {
++    return
++  }
++
+   activeTarget = target
++  $activeComposerRevision.set($activeComposerRevision.get() + 1)
+ }
+ 
+ /** Hand the routing key back when a composer unmounts, so `'active'` can never
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts b/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
+index 73ad18fa96..441e901607 100644
+--- a/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
+@@ -1,17 +1,19 @@
+ import { SLASH_COMMAND_RE } from '@hermes/shared'
+-import { type RefObject, useLayoutEffect, useRef } from 'react'
++import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
+ 
+ import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
+ import { translateNow, useI18n } from '@/i18n'
+ import { isSlashCommandText } from '@/lib/chat-runtime'
+ import { isSideTaskSlashCommand } from '@/lib/desktop-slash-commands'
+ import { triggerHaptic } from '@/lib/haptics'
++import { strictSteerDelivery } from '@/lib/strict-steering'
+ import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
+ import {
+   clearSessionDraft,
+   type ComposerAttachment,
+   freezeComposerTransportPayload,
+-  isFreshDraftScope
++  isFreshDraftScope,
++  takeSessionDraft
+ } from '@/store/composer'
+ import { resetBrowseState } from '@/store/composer-input-history'
+ import { enqueueQueuedPrompt, type QueuedPromptEntry } from '@/store/composer-queue'
+@@ -20,7 +22,7 @@ import { notify } from '@/store/notifications'
+ import { answerParkedCard, skipParkedCards, yieldParkedCardsToMessage } from '@/store/parked-card-answers'
+ import { hasBlockingPromptRequest } from '@/store/prompts'
+ 
+-import { cloneAttachments, type QueueEditState } from '../composer-utils'
++import { cloneAttachments, liveComposerDraft, type QueueEditState } from '../composer-utils'
+ import { onComposerSubmitRequest } from '../focus'
+ import { pathifyRefs } from '../path-refs'
+ import { composerPlainText } from '../rich-editor'
+@@ -28,6 +30,7 @@ import { useComposerScope, useComposerSurfaceId } from '../scope'
+ import type { ChatBarProps } from '../types'
+ 
+ interface UseComposerSubmitArgs {
++  gateway?: ChatBarProps['gateway']
+   activeQueueSessionKey: string | null
+   activeQueueSessionKeyRef: RefObject<string | null>
+   attachments: ComposerAttachment[]
+@@ -64,6 +67,7 @@ interface UseComposerSubmitArgs {
+  * external-submit listener ref.
+  */
+ export function useComposerSubmit({
++  gateway,
+   activeQueueSessionKey,
+   activeQueueSessionKeyRef,
+   attachments,
+@@ -94,6 +98,84 @@ export function useComposerSubmit({
+   const surfaceId = useComposerSurfaceId()
+   const { t } = useI18n()
+   const copy = t.desktop
++  const pendingSteers = useRef(new Set<string | null>())
++  const strictWaiters = useRef(new Set<AbortController>())
++  useEffect(
++    () => () => {
++      for (const waiter of strictWaiters.current) {waiter.abort()}
++      strictWaiters.current.clear()
++    },
++    [gateway, sessionId]
++  )
++
++  // Keep the draft in place until the strict acknowledgement. A failed or
++  // ambiguous transport must never become a normal submit/queue retry.
++  const strictSteerDraft = (blocked: boolean) => {
++    const submittedScope = draftScopeRef.current
++    const submittedText = liveComposerDraft(editorRef.current, draftRef.current)
++    const fail = () => notify({ kind: 'warning', message: translateNow('composer.strictSteerFailed') })
++
++    if (pendingSteers.current.has(submittedScope)) {
++      notify({ kind: 'info', message: translateNow('composer.strictSteerPending') })
++
++      return
++    }
++
++    if (
++      disabled ||
++      inputDisabled ||
++      !busy ||
++      blocked ||
++      !onSteer ||
++      !submittedText.trim() ||
++      attachments.length > 0 ||
++      SLASH_COMMAND_RE.test(submittedText.trim()) ||
++      hasBlockingPromptRequest(sessionId)
++    ) {
++      fail()
++
++      return
++    }
++
++    const frozen = freezeComposerTransportPayload(submittedText.trim())
++
++    if (frozen.missingLabels.length) {
++      fail()
++
++      return
++    }
++
++    stashAt(submittedScope, submittedText, attachments)
++    pendingSteers.current.add(submittedScope)
++    const waiter = new AbortController()
++    strictWaiters.current.add(waiter)
++    notify({ kind: 'info', message: translateNow('composer.strictSteerPending') })
++    void strictSteerDelivery(gateway, sessionId, id => onSteer(frozen.transportText, 'steer', id), waiter.signal)
++      .then(accepted => {
++        if (!accepted) {
++          fail()
++
++          return
++        }
++
++        // A late ACK must not erase newer typing or the newly focused session.
++        if (draftScopeRef.current === submittedScope) {
++          if (liveComposerDraft(editorRef.current, draftRef.current) === submittedText) {
++            clearDraft()
++          }
++        } else if (takeSessionDraft(submittedScope).text === submittedText) {
++          clearSessionDraft(submittedScope)
++        }
++
++        triggerHaptic('submit')
++        notify({ kind: 'success', message: translateNow('composer.strictSteerAccepted') })
++      })
++      .catch(fail)
++      .finally(() => {
++        pendingSteers.current.delete(submittedScope)
++        strictWaiters.current.delete(waiter)
++      })
++  }
+ 
+   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
+   // === false) or throws, re-stash the draft so the words survive. Repaint it
+@@ -335,7 +417,7 @@ export function useComposerSubmit({
+   }
+ 
+   const submitDraft = () => {
+-    if (disabled) {
++    if (disabled || pendingSteers.current.has(draftScopeRef.current)) {
+       return
+     }
+ 
+@@ -405,7 +487,13 @@ export function useComposerSubmit({
+   // Redirect the live turn with a correction. The gateway either restarts the
+   // active model request with its displayed context or waits for the current
+   // tool boundary. If the turn already ended, queue the words instead.
+-  const steerDraft = () => {
++  const steerDraft = (mode?: 'steer', blocked = false) => {
++    if (mode === 'steer') {
++      strictSteerDraft(blocked)
++
++      return
++    }
++
+     const text = draftRef.current.trim()
+ 
+     // Guard on live editor state, not the render-lagged `canSteer`: a redirect
+@@ -460,7 +548,7 @@ export function useComposerSubmit({
+   }
+ 
+   const queueDraft = () => {
+-    if (disabled || !busy) {
++    if (disabled || !busy || pendingSteers.current.has(draftScopeRef.current)) {
+       return
+     }
+ 
+diff --git a/apps/desktop/src/app/chat/composer/index.tsx b/apps/desktop/src/app/chat/composer/index.tsx
+index 6cb55463b2..c57e9dd4be 100644
+--- a/apps/desktop/src/app/chat/composer/index.tsx
++++ b/apps/desktop/src/app/chat/composer/index.tsx
+@@ -16,7 +16,6 @@ import { useHudComposerDrag } from '@/app/hud/composer-drag'
+ import { composerFloatingStrip, composerInputBacking } from '@/components/chat/composer-dock'
+ import { useSetupChatView } from '@/components/onboarding/first-run/assembly'
+ import { OnboardingSkip } from '@/components/onboarding/skip-setup'
+-import { Button } from '@/components/ui/button'
+ import { Slot as ContribSlot } from '@/contrib/react/slot'
+ import { useI18n } from '@/i18n'
+ import { chatMessageText } from '@/lib/chat-messages'
+@@ -43,6 +42,8 @@ import { $autoSpeakReplies } from '@/store/voice-prefs'
+ import { useTheme } from '@/themes'
+ 
+ import { AttachmentList } from './attachments'
++import { handleBehaviorEnter, handleGhostKey } from './behavior-keys'
++import { ComposerQueueEditNotice, ComposerSteerHint } from './behavior-notices'
+ import {
+   acceptsTriggerCompletion,
+   COMPOSER_FADE_BACKGROUND,
+@@ -67,6 +68,7 @@ import { useComposerDraft } from './hooks/use-composer-draft'
+ import { useComposerDrop } from './hooks/use-composer-drop'
+ import { useComposerEscCancel } from './hooks/use-composer-esc-cancel'
+ import { useComposerMetrics } from './hooks/use-composer-metrics'
++import { useComposerNextPrompt } from './hooks/use-composer-next-prompt'
+ import { useComposerPlaceholder } from './hooks/use-composer-placeholder'
+ import { useComposerPopout } from './hooks/use-composer-popout'
+ import { useComposerQueue } from './hooks/use-composer-queue'
+@@ -82,6 +84,7 @@ import { useMiddlewareSubmit } from './hooks/use-middleware-submit'
+ import { useSlashCompletions } from './hooks/use-slash-completions'
+ import { useStatusDrawer } from './hooks/use-status-drawer'
+ import { useSessionStatusPresence } from './hooks/use-status-presence'
++import { ComposerInputRow } from './input-row'
+ import { shouldConvertPasteToAttachment } from './large-paste'
+ import { ActionBadges } from './micro-actions'
+ import { chipTypedPathOnSpace, pathifyRefs } from './path-refs'
+@@ -402,6 +405,7 @@ export function ChatBar({
+   // The submit engine — the orchestration seam where draft + queue meet. Owns
+   // the submit decision tree, the send-with-restore primitive, and steer.
+   const { queueDraft, steerDraft, submitDraft } = useComposerSubmit({
++    gateway,
+     activeQueueSessionKey,
+     activeQueueSessionKeyRef,
+     attachments,
+@@ -455,6 +459,29 @@ export function ChatBar({
+     triggerLoading
+   } = useComposerTrigger({ at, draftRef, editorRef, emoji, recordUndoPoint, requestMainFocus, setComposerText, slash })
+ 
++  const nextPrompt = useComposerNextPrompt(
++    {
++      gateway,
++      profile,
++      sessionId,
++      storedId: queueSessionKey,
++      busy,
++      empty: !hasComposerPayload,
++      modelRevision: `${state.model.provider}:${state.model.model}`,
++      placeholder
++    },
++    {
++      target: scope.target,
++      inputDisabled,
++      awaitingInput,
++      blockingPrompt,
++      cardWaiting,
++      queueEdit,
++      queuedCount: queuedPrompts.length,
++      trigger
++    }
++  )
++
+   // Pull the live contentEditable text into draftRef + the AUI composer state
+   // (which drives `hasComposerPayload` → the send button). Shared by the input
+   // and compositionend paths so committed IME text reaches state through either.
+@@ -644,6 +671,22 @@ export function ChatBar({
+     scheduleFlushEditorToDraft(event.currentTarget)
+   }
+ 
++  const handleBehaviorKey = (event: Parameters<typeof handleBehaviorEnter>[0]) =>
++    handleBehaviorEnter(event, {
++      busy,
++      disabled,
++      inputDisabled,
++      cardWaiting,
++      queueEdit: Boolean(queueEdit),
++      readDraft: () => liveComposerDraft(editorRef.current, draftRef.current),
++      syncDraft: text => {
++        draftRef.current = text
++        setComposerText(text)
++      },
++      steerDraft,
++      queueDraft
++    })
++
+   const handleEditorKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+     // Self-heal a stale composition flag before the guard below reads it.
+     // compositionend can be missed (focus jumps, input-source switches, or a
+@@ -874,6 +917,30 @@ export function ChatBar({
+       }
+     }
+ 
++    if (
++      handleGhostKey(event, {
++        trigger: Boolean(trigger),
++        text: nextPrompt.text || '',
++        busy,
++        cardWaiting,
++        hasAttachments: attachments.length > 0,
++        readDraft: () => liveComposerDraft(editorRef.current, draftRef.current),
++        decide: nextPrompt.decide,
++        markConsumed: () => {
++          triggerKeyConsumedRef.current = true
++        },
++        consume: text => {
++          withUndoPoint(() => {
++            loadIntoComposer(text, [])
++
++            return true
++          })
++        }
++      })
++    ) {
++      return
++    }
++
+     // ArrowUp/ArrowDown navigate, in priority order: the queue (edit entries in
+     // place) then sent-message history. The history ring is derived from live
+     // session messages each press — single source of truth, no mirror.
+@@ -946,24 +1013,7 @@ export function ChatBar({
+       return
+     }
+ 
+-    // Cmd/Ctrl+Enter queues a follow-up while a turn runs. Plain Enter steers
+-    // a text-only draft, so both live-turn actions stay reachable by keyboard.
+-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
+-      event.preventDefault()
+-
+-      if (busy && !disabled) {
+-        // As with plain Enter, source the just-typed content from the DOM so a
+-        // fast keypress cannot queue a stale draft.
+-        const editorText = liveComposerDraft(editorRef.current, draftRef.current)
+-
+-        if (editorText !== draftRef.current) {
+-          draftRef.current = editorText
+-          setComposerText(editorText)
+-        }
+-
+-        queueDraft()
+-      }
+-
++    if (handleBehaviorKey(event)) {
+       return
+     }
+ 
+@@ -979,7 +1029,7 @@ export function ChatBar({
+       const editorText = liveComposerDraft(editorRef.current, draftRef.current)
+       const hasLivePayload = editorText.trim().length > 0 || attachments.length > 0
+ 
+-      if (disabled) {
++      if (disabled || (!busy && (event.metaKey || event.ctrlKey))) {
+         return
+       }
+ 
+@@ -989,8 +1039,8 @@ export function ChatBar({
+         return
+       }
+ 
+-      // Empty Enter while busy. With prompts queued this is the double-send:
+-      // the first Enter put the words in the queue, a second delivers them
++      // The native (extension-free) empty Enter delivers the queue head:
++      // the extension's queue/steer branches return before this fallback.
+       // now — steered into the live turn when a steer can carry them, else
+       // promote + interrupt + drain on settle — mirroring the idle empty-Enter
+       // drain above. With nothing queued it stays a no-op — interrupting is
+@@ -1156,7 +1206,7 @@ export function ChatBar({
+           hudNativeDrag && '[-webkit-app-region:no-drag]'
+         )}
+         contentEditable={!inputDisabled}
+-        data-placeholder={placeholder}
++        {...nextPrompt.inputProps}
+         data-slot={RICH_INPUT_SLOT}
+         dir={textDirection}
+         onBeforeInput={handleEditorBeforeInput}
+@@ -1200,7 +1250,10 @@ export function ChatBar({
+         onCut={handleCut}
+         onDragOver={handleInputDragOver}
+         onDrop={handleInputDrop}
+-        onFocus={() => markActiveComposer(scope.target)}
++        onFocus={() => {
++          markActiveComposer(scope.target)
++          nextPrompt.refresh()
++        }}
+         onInput={handleEditorInput}
+         onKeyDown={handleEditorKeyDown}
+         onKeyUp={handleEditorKeyUp}
+@@ -1498,54 +1551,10 @@ export function ChatBar({
+                   />
+                   <VoiceActivity state={voiceActivityState} />
+                   <VoicePlaybackActivity />
+-                  {queueEdit && editingQueuedPrompt && (
+-                    <div className="flex items-center justify-between gap-2 rounded-lg border border-[color-mix(in_srgb,var(--dt-composer-ring)_32%,transparent)] bg-accent/18 px-2 py-1">
+-                      <div className="min-w-0 text-[0.7rem] text-muted-foreground/88">
+-                        {t.composer.editingQueuedInComposer}
+-                      </div>
+-                      <div className="flex shrink-0 items-center gap-1">
+-                        <Button
+-                          className="h-6 rounded-md px-2 text-[0.68rem]"
+-                          onClick={() => exitQueuedEdit('cancel')}
+-                          type="button"
+-                          variant="ghost"
+-                        >
+-                          {t.common.cancel}
+-                        </Button>
+-                        <Button
+-                          className="h-6 rounded-md px-2 text-[0.68rem]"
+-                          onClick={() => exitQueuedEdit('save')}
+-                          type="button"
+-                        >
+-                          {t.common.save}
+-                        </Button>
+-                      </div>
+-                    </div>
+-                  )}
++                  <ComposerQueueEditNotice edit={queueEdit} onExit={exitQueuedEdit} prompt={editingQueuedPrompt} />
+                   {attachments.length > 0 && <AttachmentList attachments={attachments} onRemove={onRemoveAttachment} />}
+-                  <div
+-                    className={cn(
+-                      'grid w-full',
+-                      stacked
+-                        ? 'grid-cols-[auto_1fr] gap-(--composer-row-gap) [grid-template-areas:"input_input"_"menu_controls"]'
+-                        : 'grid-cols-[auto_1fr_auto] items-center gap-(--composer-control-gap) [grid-template-areas:"menu_input_controls"]'
+-                    )}
+-                  >
+-                    <div className="flex translate-y-[3px] items-start gap-(--composer-control-gap) self-start [grid-area:menu]">
+-                      {contextMenu}
+-                      <ContribSlot area={COMPOSER_AREAS.leading} />
+-                    </div>
+-                    <div className="min-w-0 [grid-area:input]">{input}</div>
+-                    {/* `justify-end` packs contributed actions and the send cluster
+-                      together on the right. The cluster must not carry its own
+-                      `ml-auto`: in the stacked layout the auto margin absorbs the
+-                      row's free space and pins a contributed action to the row
+-                      start, detached from the cluster (#116332). */}
+-                    <div className="flex min-w-0 items-center justify-end gap-(--composer-control-gap) [grid-area:controls]">
+-                      <ContribSlot area={COMPOSER_AREAS.actions} />
+-                      {controls}
+-                    </div>
+-                  </div>
++                  <ComposerInputRow contextMenu={contextMenu} controls={controls} input={input} stacked={stacked} />
++                  <ComposerSteerHint canSteer={canSteer} hasPayload={hasComposerPayload} />
+                   <ContribSlot area={COMPOSER_AREAS.bottom} />
+                 </div>
+               </div>
+diff --git a/apps/desktop/src/app/chat/composer/types.ts b/apps/desktop/src/app/chat/composer/types.ts
+index 3a9aa50922..e3eabebf4a 100644
+--- a/apps/desktop/src/app/chat/composer/types.ts
++++ b/apps/desktop/src/app/chat/composer/types.ts
+@@ -61,7 +61,7 @@ export interface ChatBarProps {
+   onPickFolders?: () => void
+   onPickImages?: () => void
+   onRemoveAttachment?: (id: string) => void
+-  onSteer?: (text: string) => Promise<boolean> | boolean
++  onSteer?: (text: string, mode?: 'steer', steerId?: string) => Promise<boolean> | boolean
+   /** Delivers a hidden note to the model mid-turn with no user turn (gateway session.steer). */
+   onSteerHidden?: (text: string) => Promise<boolean> | boolean
+   onSubmit: (value: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
+diff --git a/apps/desktop/src/app/chat/index.tsx b/apps/desktop/src/app/chat/index.tsx
+index 08ca23341c..63a091b4de 100644
+--- a/apps/desktop/src/app/chat/index.tsx
++++ b/apps/desktop/src/app/chat/index.tsx
+@@ -113,7 +113,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
+   onPickFolders: () => void
+   onPickImages: () => void
+   onRemoveAttachment: (id: string) => void
+-  onSteer: (text: string) => Promise<boolean> | boolean
++  onSteer: (text: string, mode?: 'steer', steerId?: string) => Promise<boolean> | boolean
+   onSteerHidden?: (text: string) => Promise<boolean> | boolean
+   onSubmit: (text: string, options?: SubmitTextOptions) => Promise<boolean> | boolean
+   onThreadMessagesChange: (messages: readonly ThreadMessage[]) => void
+diff --git a/apps/desktop/src/app/chat/session-tile-actions.test.ts b/apps/desktop/src/app/chat/session-tile-actions.test.ts
+index 34e4a3793d..74c63788bd 100644
+--- a/apps/desktop/src/app/chat/session-tile-actions.test.ts
++++ b/apps/desktop/src/app/chat/session-tile-actions.test.ts
+@@ -83,6 +83,17 @@ describe('session tile optimistic owner metadata', () => {
+ // "sleep/wake session recovery" suite for the same regression on the
+ // primary chat's own reloadFromMessage.
+ describe('useSessionTileActions sleep/wake session recovery', () => {
++  it('strict steering uses only the tile owner steer RPC and rejects an ambiguous queue ACK', async () => {
++    requestGatewayMock.mockResolvedValue({ status: 'queued' })
++    const { result } = renderTileActions()
++    expect(await result.current.steerPrompt('tile guidance', 'steer', 'a'.repeat(32))).toBe(false)
++    expect(requestGatewayMock).toHaveBeenCalledExactlyOnceWith('session.steer', {
++      session_id: RUNTIME_SESSION_ID,
++      text: 'tile guidance',
++      strict: true,
++      steer_id: 'a'.repeat(32)
++    })
++  })
+   beforeEach(() => {
+     $activeSessionId.set('foreground-runtime')
+     setSessions([])
+diff --git a/apps/desktop/src/app/chat/session-tile-actions.ts b/apps/desktop/src/app/chat/session-tile-actions.ts
+index 8c5e6cd002..167317495b 100644
+--- a/apps/desktop/src/app/chat/session-tile-actions.ts
++++ b/apps/desktop/src/app/chat/session-tile-actions.ts
+@@ -11,7 +11,7 @@
+ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
+ import { useCallback, useMemo, useRef } from 'react'
+ 
+-import type { ClientSessionState } from '@/app/types'
++import type { ClientSessionState, SessionSteerResponse } from '@/app/types'
+ import type { WorkspaceMode } from '@/contrib/types'
+ import { useI18n } from '@/i18n'
+ import { type ChatMessage, textPart } from '@/lib/chat-messages'
+@@ -422,7 +422,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
+   )
+ 
+   const steerPrompt = useCallback(
+-    async (rawText: string): Promise<boolean> => {
++    async (rawText: string, mode?: 'steer', steerId?: string): Promise<boolean> => {
+       const text = rawText.trim()
+       const sessionId = runtimeIdRef.current
+ 
+@@ -430,6 +430,21 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
+         return false
+       }
+ 
++      if (mode === 'steer') {
++        try {
++          const result = await requestSessionGateway<SessionSteerResponse>('session.steer', {
++            session_id: sessionId,
++            text,
++            strict: true,
++            steer_id: steerId
++          })
++
++          return result?.status === 'steered'
++        } catch {
++          return false
++        }
++      }
++
+       const messageId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+ 
+       const mutate = (updater: (state: ClientSessionState) => ClientSessionState) =>
+diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts b/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+index ce687cfdf9..ed1ea7a51d 100644
+--- a/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
++++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+@@ -794,7 +794,7 @@ export function usePromptActions({
+   // completed work intact. During a tool it waits for the safe result boundary.
+   // Returns false when the turn raced to completion so the composer can queue.
+   const redirectPrompt = useCallback(
+-    async (rawText: string): Promise<boolean> => {
++    async (rawText: string, mode?: 'steer', steerId?: string): Promise<boolean> => {
+       const text = sanitizeComposerInput(rawText).trim()
+ 
+       // Ref, not the closure-captured prop — see cancelRun above. A redirect
+@@ -836,6 +836,19 @@ export function usePromptActions({
+       // message after the interrupted checkpoint, matching the durable core
+       // transcript rather than a system note that changes role after reload.
+       const send = async (id: string): Promise<boolean> => {
++        if (mode === 'steer') {
++          // Steering is injected at a safe tool boundary, not an interrupted
++          // user turn. Preserve the live stream and its durable transcript.
++          const result = await target.requestGateway<{ status?: string }>('session.steer', {
++            session_id: id,
++            text,
++            strict: true,
++            steer_id: steerId
++          })
++
++          return result?.status === 'steered'
++        }
++
+         // Redirect aborts the model request, so the completion event can race
+         // its RPC response. Record the correction *before* awaiting the
+         // gateway, in arrival order: sealed already-streamed output above,
+@@ -891,6 +904,12 @@ export function usePromptActions({
+       }
+ 
+       try {
++        // Strict steering never resumes/replays a missing session. Old
++        // backends reject the extra param before any write (fail closed).
++        if (mode === 'steer') {
++          return await send(target.sessionId)
++        }
++
+         // A stale runtime id after reconnect 404s ("session not found"): the
+         // shared resolver resumes the stored session and retries once, so a
+         // correction right after a reconnect isn't lost to the race.
+diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx b/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx
+index 4692136712..a538dd115f 100644
+--- a/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx
++++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/prompt-actions-harness.tsx
+@@ -30,7 +30,7 @@ export interface HarnessHandle {
+   restoreToMessage: (messageId: string, target?: { text?: string; userOrdinal?: number | null }) => Promise<void>
+   redirectPrompt: (text: string) => Promise<boolean>
+   /** @deprecated Use `redirectPrompt`. */
+-  steerPrompt: (text: string) => Promise<boolean>
++  steerPrompt: (text: string, mode?: 'steer', steerId?: string) => Promise<boolean>
+   submitTextRaw: (text: string, options?: SubmitTextOptions) => Promise<boolean>
+   submitText: (text: string, options?: SubmitTextOptions) => Promise<boolean>
+ }
+diff --git a/apps/desktop/src/app/types.ts b/apps/desktop/src/app/types.ts
+index dd7adb9f80..3f548a7e36 100644
+--- a/apps/desktop/src/app/types.ts
++++ b/apps/desktop/src/app/types.ts
+@@ -86,9 +86,9 @@ export interface SessionCompressResponse {
+ }
+ 
+ export interface SessionSteerResponse {
+-  // 'queued' == accepted into the live turn's steer slot (injected at the next
+-  // tool-result boundary); 'rejected' == no live tool window, caller queues.
+-  status?: 'queued' | 'rejected'
++  // Strict: 'steered' acknowledges safe-boundary buffering, not consumption.
++  // Legacy 'queued' is ambiguous (may be next-turn); strict callers reject it.
++  status?: 'steered' | 'queued' | 'rejected'
+   text?: string
+ }
+ 
+diff --git a/apps/desktop/src/i18n/ar_chat.ts b/apps/desktop/src/i18n/ar_chat.ts
+index 49c99c4e5c..ac0db45c8e 100644
+--- a/apps/desktop/src/i18n/ar_chat.ts
++++ b/apps/desktop/src/i18n/ar_chat.ts
+@@ -2,6 +2,11 @@ import type { TranslationOverrides } from './define-locale'
+ 
+ export const arChat = {
+   composer: {
++    steerKeyHint: 'توجيه الدور الجاري',
++    strictSteerAccepted: "تم إدراج Steering عند نقطة آمنة؛ وليس في قائمة انتظار الدور التالي.",
++    strictSteerFailed:
++      'لم يتم تأكيد Steering. تم الاحتفاظ بالمسودة دون وضعها تلقائياً في قائمة الانتظار أو مقاطعة العمل. عند فشل الاتصال تحقق من التسليم قبل إعادة المحاولة.',
++    strictSteerPending: 'Steering بانتظار التأكيد. تم الاحتفاظ بالمسودة.',
+     message: 'الرسالة',
+     wakingProfile: profile => `جار إيقاظ ${profile}`,
+     placeholderStarting: 'جار بدء Hermes...',
+diff --git a/apps/desktop/src/i18n/de.ts b/apps/desktop/src/i18n/de.ts
+index c32d9d75f6..e219f3be73 100644
+--- a/apps/desktop/src/i18n/de.ts
++++ b/apps/desktop/src/i18n/de.ts
+@@ -12,6 +12,7 @@ import { deNotices } from './de_notices'
+ import { deOnboarding } from './de_onboarding'
+ import { deProjects } from './de_projects'
+ import { deSharedMetrics } from './de_shared_metrics'
++import { steeringCopy } from './de_steering'
+ import { deThemePicker } from './de_theme_picker'
+ import { deUpdateChannel } from './de_update_channel'
+ import { defineLocale, type TranslationOverrides } from './define-locale'
+@@ -3807,6 +3808,7 @@ export const deOverrides = {
+     markAllRead: 'Alle als gelesen markieren'
+   },
+   composer: {
++    ...steeringCopy,
+     message: 'Nachricht',
+     wakingProfile: profile => `Wecke ${profile}…`,
+     placeholderStarting: 'Hermes wird gestartet…',
+@@ -3832,9 +3834,6 @@ export const deOverrides = {
+     ],
+     startVoice: 'Sprachkonversation starten',
+     openDirective: 'Öffnen',
+-    queueMessage: 'Nachricht einreihen',
+-    steer: 'Laufenden Lauf steuern',
+-    stop: 'Stopp',
+     send: 'Senden',
+     speaking: 'Spricht',
+     transcribing: 'Transkribiert',
+diff --git a/apps/desktop/src/i18n/en.ts b/apps/desktop/src/i18n/en.ts
+index 6927122f52..ade4ab6555 100644
+--- a/apps/desktop/src/i18n/en.ts
++++ b/apps/desktop/src/i18n/en.ts
+@@ -15,6 +15,7 @@ import { enNotices } from './en_notices'
+ import { enOnboarding } from './en_onboarding'
+ import { enProjects } from './en_projects'
+ import { enSharedMetrics } from './en_shared_metrics'
++import { steeringCopy } from './en_steering'
+ import { enThemePicker } from './en_theme_picker'
+ import { enUninstallSection } from './en_uninstall_section'
+ import { enUpdateChannel } from './en_update_channel'
+@@ -3369,6 +3370,7 @@ export const en: Translations = {
+   },
+ 
+   composer: {
++    ...steeringCopy,
+     message: 'Message',
+     wakingProfile: profile => `Waking up ${profile}…`,
+     placeholderStarting: 'Starting Hermes...',
+@@ -3394,9 +3396,6 @@ export const en: Translations = {
+     ],
+     startVoice: 'Start voice conversation',
+     openDirective: 'Open',
+-    queueMessage: 'Queue message',
+-    steer: 'Steer the current run',
+-    stop: 'Stop',
+     send: 'Send',
+     speaking: 'Speaking',
+     transcribing: 'Transcribing',
+diff --git a/apps/desktop/src/i18n/es.ts b/apps/desktop/src/i18n/es.ts
+index 51939f70e7..56a9a43ad1 100644
+--- a/apps/desktop/src/i18n/es.ts
++++ b/apps/desktop/src/i18n/es.ts
+@@ -13,6 +13,7 @@ import { esNotices } from './es_notices'
+ import { esOnboarding } from './es_onboarding'
+ import { esProjects } from './es_projects'
+ import { esSharedMetrics } from './es_shared_metrics'
++import { steeringCopy } from './es_steering'
+ import { esThemePicker } from './es_theme_picker'
+ import { esUpdateChannel } from './es_update_channel'
+ import { introEs } from './intro-es'
+@@ -3801,6 +3802,7 @@ export const esOverrides = {
+     markAllRead: 'Marcar todo como leído'
+   },
+   composer: {
++    ...steeringCopy,
+     message: 'Mensaje',
+     wakingProfile: profile => `Despertando ${profile}…`,
+     placeholderStarting: 'Iniciando Hermes...',
+@@ -3826,9 +3828,6 @@ export const esOverrides = {
+     ],
+     startVoice: 'Iniciar conversación de voz',
+     openDirective: 'Abrir',
+-    queueMessage: 'Poner mensaje en cola',
+-    steer: 'Guiar la ejecución actual',
+-    stop: 'Detener',
+     send: 'Enviar',
+     speaking: 'Hablando',
+     transcribing: 'Transcribiendo',
+diff --git a/apps/desktop/src/i18n/fr.ts b/apps/desktop/src/i18n/fr.ts
+index 64dacb08b0..9c788d6842 100644
+--- a/apps/desktop/src/i18n/fr.ts
++++ b/apps/desktop/src/i18n/fr.ts
+@@ -13,6 +13,7 @@ import { frNotices } from './fr_notices'
+ import { frOnboarding } from './fr_onboarding'
+ import { frProjects } from './fr_projects'
+ import { frSharedMetrics } from './fr_shared_metrics'
++import { steeringCopy } from './fr_steering'
+ import { frThemePicker } from './fr_theme_picker'
+ import { frUpdateChannel } from './fr_update_channel'
+ import { introFr } from './intro-fr'
+@@ -3815,6 +3816,7 @@ export const frOverrides = {
+     markAllRead: 'Tout marquer comme lu'
+   },
+   composer: {
++    ...steeringCopy,
+     message: 'Message',
+     wakingProfile: profile => `Réveil de ${profile}…`,
+     placeholderStarting: 'Démarrage de Hermes…',
+@@ -3840,9 +3842,6 @@ export const frOverrides = {
+     ],
+     startVoice: 'Démarrer la conversation vocale',
+     openDirective: 'Ouvrir',
+-    queueMessage: "Mettre le message en file d'attente",
+-    steer: "Diriger l'exécution en cours",
+-    stop: 'Arrêter',
+     send: 'Envoyer',
+     speaking: 'Parle',
+     transcribing: 'Transcription',
+diff --git a/apps/desktop/src/i18n/ja.ts b/apps/desktop/src/i18n/ja.ts
+index 12a58eb3ee..0cbc87ebdb 100644
+--- a/apps/desktop/src/i18n/ja.ts
++++ b/apps/desktop/src/i18n/ja.ts
+@@ -13,6 +13,7 @@ import { jaOnboarding } from './ja_onboarding'
+ import { jaPluginSettings } from './ja_plugins'
+ import { jaProjects } from './ja_projects'
+ import { jaSharedMetrics } from './ja_shared_metrics'
++import { steeringCopy } from './ja_steering'
+ import { jaThemePicker } from './ja_theme_picker'
+ import { jaUpdateChannel } from './ja_update_channel'
+ 
+@@ -2385,6 +2386,7 @@ export const jaOverrides = {
+   },
+ 
+   composer: {
++    ...steeringCopy,
+     message: 'メッセージ',
+     wakingProfile: profile => `${profile} を起動中…`,
+     placeholderStarting: 'Hermes を起動中...',
+@@ -2410,8 +2412,6 @@ export const jaOverrides = {
+     ],
+     startVoice: '音声会話を開始',
+     openDirective: '開く',
+-    queueMessage: 'メッセージをキューに入れる',
+-    stop: '停止',
+     send: '送信',
+     speaking: '話しています',
+     transcribing: '文字起こし中',
+diff --git a/apps/desktop/src/i18n/ru.ts b/apps/desktop/src/i18n/ru.ts
+index f2a9345b5a..a4c8e97718 100644
+--- a/apps/desktop/src/i18n/ru.ts
++++ b/apps/desktop/src/i18n/ru.ts
+@@ -11,6 +11,7 @@ import { ruOnboarding } from './ru_onboarding'
+ import { ruPluginSettings } from './ru_plugins'
+ import { ruProjects } from './ru_projects'
+ import { ruSharedMetrics } from './ru_shared_metrics'
++import { steeringCopy } from './ru_steering'
+ import { ruThemePicker } from './ru_theme_picker'
+ import { ruUpdateChannel } from './ru_update_channel'
+ 
+@@ -2653,6 +2654,7 @@ export const ruOverrides = {
+     markAllRead: 'Отметить все как прочитанные'
+   },
+   composer: {
++    ...steeringCopy,
+     message: 'Сообщение',
+     wakingProfile: profile => `Пробуждаем ${profile}…`,
+     placeholderStarting: 'Запуск Hermes...',
+@@ -2678,9 +2680,6 @@ export const ruOverrides = {
+     ],
+     startVoice: 'Начать голосовой разговор',
+     openDirective: 'Открыть',
+-    queueMessage: 'Вставить сообщение в очередь',
+-    steer: 'Направить текущий запуск',
+-    stop: 'Стоп',
+     send: 'Отправить',
+     speaking: 'Говорит',
+     transcribing: 'Расшифровка',
+diff --git a/apps/desktop/src/i18n/types.ts b/apps/desktop/src/i18n/types.ts
+index e8e7a110cd..c44660db9b 100644
+--- a/apps/desktop/src/i18n/types.ts
++++ b/apps/desktop/src/i18n/types.ts
+@@ -1,11 +1,10 @@
++import type { ErrorCodeKey } from '@/lib/error-surface'
+ // Desktop i18n type contract.
+ //
+ // `Translations` is the single source of truth for every translatable string
+ // surface. Fully translated locale files may satisfy this interface directly;
+ // partial locales should use `defineLocale()` so missing desktop-only strings
+ // fall back to English while new keys remain type-checked.
+-
+-import type { ErrorCodeKey } from '@/lib/error-surface'
+ import type { TipId } from '@/lib/tips/catalog'
+ 
+ import type { AppTourTranslations } from './types_app_tour'
+@@ -21,6 +20,7 @@ import type { NoticeTranslations } from './types_notices'
+ import type { OnboardingTranslations } from './types_onboarding'
+ import type { SidebarProjectsTranslations } from './types_projects'
+ import type { SharedMetricsTranslations } from './types_shared_metrics'
++import type { ComposerSteeringCopy } from './types_steering'
+ import type { ThemePickerCopy } from './types_theme_picker'
+ import type { UninstallSectionTranslations } from './types_uninstall_section'
+ import type { UpdateChannelCopy } from './types_update_channel'
+@@ -2952,7 +2952,7 @@ export interface Translations extends NoticeTranslations {
+     markAllRead: string
+   }
+ 
+-  composer: {
++  composer: ComposerSteeringCopy & {
+     message: string
+     wakingProfile: (profile: string) => string
+     placeholderStarting: string
+@@ -2962,9 +2962,6 @@ export interface Translations extends NoticeTranslations {
+     followUpPlaceholders: readonly string[]
+     startVoice: string
+     openDirective: string
+-    queueMessage: string
+-    steer: string
+-    stop: string
+     send: string
+     speaking: string
+     transcribing: string
+diff --git a/apps/desktop/src/i18n/zh-hant_chat.ts b/apps/desktop/src/i18n/zh-hant_chat.ts
+index a61e1f0fef..f93eb0b20f 100644
+--- a/apps/desktop/src/i18n/zh-hant_chat.ts
++++ b/apps/desktop/src/i18n/zh-hant_chat.ts
+@@ -2,6 +2,10 @@ import type { TranslationOverrides } from './define-locale'
+ 
+ export const zhHantChat = {
+   composer: {
++    steerKeyHint: '引導目前回合',
++    strictSteerAccepted: "已 Steering：已在安全邊界注入，不是下一輪排隊。",
++    strictSteerFailed: 'Steering 未獲確認。草稿已保留，不會自動排隊或中斷；連線異常時請先確認是否送達再重試。',
++    strictSteerPending: 'Steering 正在等待確認，草稿暫時保留。',
+     message: '訊息',
+     wakingProfile: profile => `正在喚醒 ${profile}…`,
+     placeholderStarting: '正在啟動 Hermes...',
+diff --git a/apps/desktop/src/i18n/zh.ts b/apps/desktop/src/i18n/zh.ts
+index d2db20444e..380b2ef430 100644
+--- a/apps/desktop/src/i18n/zh.ts
++++ b/apps/desktop/src/i18n/zh.ts
+@@ -12,6 +12,7 @@ import { zhNotices } from './zh_notices'
+ import { zhOnboarding } from './zh_onboarding'
+ import { zhProjects } from './zh_projects'
+ import { zhSharedMetrics } from './zh_shared_metrics'
++import { steeringCopy } from './zh_steering'
+ import { zhThemePicker } from './zh_theme_picker'
+ import { zhUpdateChannel } from './zh_update_channel'
+ 
+@@ -3264,6 +3265,7 @@ export const zhOverrides = {
+   },
+ 
+   composer: {
++    ...steeringCopy,
+     message: '消息',
+     wakingProfile: profile => `正在唤醒 ${profile}…`,
+     placeholderStarting: '正在启动 Hermes…',
+@@ -3289,9 +3291,6 @@ export const zhOverrides = {
+     ],
+     startVoice: '开始语音对话',
+     openDirective: '打开',
+-    queueMessage: '排队消息',
+-    steer: '引导当前运行',
+-    stop: '停止',
+     send: '发送',
+     speaking: '讲话中',
+     transcribing: '转写中',
+diff --git a/apps/desktop/src/lib/keybinds/actions.ts b/apps/desktop/src/lib/keybinds/actions.ts
+index 97c0a666b9..fc5350183f 100644
+--- a/apps/desktop/src/lib/keybinds/actions.ts
++++ b/apps/desktop/src/lib/keybinds/actions.ts
+@@ -8,6 +8,7 @@
+ import { registry } from '@/contrib/registry'
+ import type { Contribution } from '@/contrib/types'
+ import { isMacPlatform } from '@/lib/platform'
++import { behaviorKeys } from '@/store/composer-behavior'
+ 
+ export type KeybindCategory = 'composer' | 'profiles' | 'session' | 'navigation' | 'view'
+ 
+@@ -348,8 +349,20 @@ export interface KeybindReadonly {
+ export const KEYBIND_READONLY: readonly KeybindReadonly[] = [
+   { id: 'composer.send', category: 'composer', keys: ['enter'] },
+   { id: 'composer.newline', category: 'composer', keys: ['shift+enter'] },
+-  { id: 'composer.steer', category: 'composer', keys: ['enter'] },
+-  { id: 'composer.queue', category: 'composer', keys: ['mod+enter'] },
++  {
++    id: 'composer.steer',
++    category: 'composer',
++    get keys() {
++      return behaviorKeys('composer.steer', ['enter'])
++    }
++  },
++  {
++    id: 'composer.queue',
++    category: 'composer',
++    get keys() {
++      return behaviorKeys('composer.queue', ['mod+enter'])
++    }
++  },
+   { id: 'composer.sendQueued', category: 'composer', keys: ['mod+shift+k'] },
+   { id: 'composer.mention', category: 'composer', keys: ['@'] },
+   { id: 'composer.slash', category: 'composer', keys: ['/'] },
+diff --git a/apps/desktop/src/sdk/composer.ts b/apps/desktop/src/sdk/composer.ts
+index 565db36838..0fe11a3cae 100644
+--- a/apps/desktop/src/sdk/composer.ts
++++ b/apps/desktop/src/sdk/composer.ts
+@@ -8,6 +8,7 @@ import {
+   requestComposerSubmit
+ } from '@/app/chat/composer/focus'
+ import { freshDraftScope, takeSessionDraft } from '@/store/composer'
++import { COMPOSER_BEHAVIOR_VERSION } from '@/store/composer-behavior'
+ import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
+ import { $sessionStates } from '@/store/session-states'
+ 
+@@ -63,6 +64,8 @@ const resolveComposerAddress = (
+  *  resolves to no live surface returns `null`/`false` (or is dropped, for
+  *  `focus`) — it never broadcasts and never throws. */
+ export const composerHost = {
++  behaviorVersion: COMPOSER_BEHAVIOR_VERSION,
++  strictSteeringVersion: 1,
+   /** The live draft text of one composer, or null when nothing holds it.
+    *  Mounted surfaces answer with their in-DOM text (current, incl.
+    *  unsaved keystrokes); an unmounted session falls back to its debounced
+diff --git a/apps/desktop/src/store/session-states.ts b/apps/desktop/src/store/session-states.ts
+index 3ec1898ecf..02c24ad8b0 100644
+--- a/apps/desktop/src/store/session-states.ts
++++ b/apps/desktop/src/store/session-states.ts
+@@ -33,13 +33,14 @@ import {
+ } from '@/components/pane-shell/tree/store'
+ import { resolveRememberedActivePane, workspaceScopeKey } from '@/components/pane-shell/workspace-scope'
+ import type { WorkspaceMode } from '@/contrib/types'
+-import { type ChatMessage, chatMessageText, finalizeInterruptedMessages, sealOpenToolParts } from '@/lib/chat-messages'
++import { type ChatMessage, finalizeInterruptedMessages, sealOpenToolParts } from '@/lib/chat-messages'
+ import type { ErrorSurface } from '@/lib/error-surface'
+ import { tileFocusStampOnFocusChange } from '@/lib/session-timer-since'
+ import { stableArray } from '@/lib/stable-array'
+ import { readJson, writeJson } from '@/lib/storage'
+ import type { SessionInfo } from '@/types/hermes'
+ 
++import { notifyBehaviorLifecycle } from './composer-behavior'
+ import { dropStatusDrawersForProfile, migrateStatusDrawersForProfile } from './composer-status-drawer'
+ import { registryConnectionKind } from './connection-registry-state'
+ import { recordDislike } from './desktop-metrics'
+@@ -93,6 +94,7 @@ import {
+   type SessionOwnerScope,
+   type SessionProfileRoute
+ } from './session-request-router'
++import { turnHasReply } from './session-states_reply'
+ import { ackStoredSessionId, markSessionUnreadFinished } from './session-unread'
+ import { migrateTranscriptTailsForProfile } from './transcript-tail-cache'
+ import { isBrowserWindow, isSecondaryWindow } from './windows'
+@@ -490,26 +492,6 @@ function settleEndedLiveTurn(runtimeId: string) {
+ const NO_REPLY_SURFACE: ErrorSurface = { code: 'no_reply', layer: 'runtime', retryable: true }
+ const NO_REPLY_ERROR = 'Hermes ended this turn without a reply.'
+ 
+-function turnHasReply(messages: ChatMessage[]): boolean {
+-  for (let index = messages.length - 1; index >= 0; index -= 1) {
+-    const message = messages[index]
+-
+-    if (message.hidden) {
+-      continue
+-    }
+-
+-    if (message.role === 'user') {
+-      return false
+-    }
+-
+-    if (message.role === 'assistant' && (message.error || chatMessageText(message).trim())) {
+-      return true
+-    }
+-  }
+-
+-  return false
+-}
+-
+ function withNoReplyNotice(messages: ChatMessage[]): ChatMessage[] {
+   const last = messages.findLast(message => !message.hidden)
+ 
+@@ -2810,6 +2792,11 @@ export function dropTilesForProfile(
+   // remotes whose tile key uses the URL fallback. Reuse the writer's resolved
+   // connection scope so deletion cannot erase same-named local tabs instead.
+   const ambientConnection = tileConnectionId || LOCAL_CONNECTION_ID
++  notifyBehaviorLifecycle({
++    kind: 'drop',
++    profile: routeTarget || routeProfile || name,
++    connectionId: route ? routeConnection : ambientConnection
++  })
+   const removedScope = backendScopeKey(route ? routeConnection : ambientConnection, routeProfile || name)
+ 
+   const ownerMatches = (owner: SessionProfileRoute | undefined): boolean => {
+@@ -2946,6 +2933,7 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string):
+   migrateSessionOwnerHintsForProfile(from, to)
+   migratePreviewArtifactsForProfile(from, to)
+   migrateStatusDrawersForProfile(from, to)
++  notifyBehaviorLifecycle({ kind: 'rename', from, to })
+   // Sibling family: the rail's profile-keyed buckets move with the rename, or
+   // the renamed profile opens with an empty rail and the old name keeps them.
+   migratePreviewTabsForProfile(from, to)
+diff --git a/apps/shared/src/gateway-contract.generated.ts b/apps/shared/src/gateway-contract.generated.ts
+index 61cd9bcd4e..fc0a913c55 100644
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -3551,16 +3551,23 @@ export interface SessionInterruptResult {
+   turn_isolation?: boolean | null
+ }
+ export type InterruptStatus = 'interrupted' | 'not_interrupted'
+-export interface SessionCorrectionParams {
++export interface SessionSteerParams {
+   session_id: string
+   profile?: string | null
+   text: string
++  strict?: boolean
++  steer_id?: string | null
+ }
+ export interface SessionCorrectionResult {
+   status: CorrectionStatus
+   text: string
+ }
+-export type CorrectionStatus = 'queued' | 'redirected' | 'rejected'
++export type CorrectionStatus = 'queued' | 'steered' | 'redirected' | 'rejected'
++export interface SessionCorrectionParams {
++  session_id: string
++  profile?: string | null
++  text: string
++}
+ export interface SpawnTreeSaveParams {
+   profile?: string | null
+   subagents: Record<string, unknown>[]
+@@ -4916,6 +4923,10 @@ export interface NotificationShowPayload {
+ export interface NotificationClearPayload {
+   key: string
+ }
++export interface SteerDeliveryPayload {
++  steer_id: string
++  delivered: boolean
++}
+ /** ``tools/tip_tool.py``. */
+ export interface TipShowPayload {
+   selector: string
+@@ -5520,7 +5531,7 @@ export interface RpcMethods {
+   /** Rendered /status text for the session. */
+   'session.status': { params: SessionStatusParams; result: SessionStatusResult }
+   /** Inject text into the next tool result without interrupting the turn. */
+-  'session.steer': { params: SessionCorrectionParams; result: SessionCorrectionResult }
++  'session.steer': { params: SessionSteerParams; result: SessionCorrectionResult }
+   /** Read or set a live session's title; a title set before the row exists is queued. */
+   'session.title': { params: SessionTitleParams; result: SessionTitleResult }
+   /** Drop the last user turn (and everything after it) from an idle session. */
+@@ -6068,6 +6079,8 @@ export interface BackendGatewayEventMap {
+   'skin.changed': SkinPayload
+   /** Transient status line (kind: status, lifecycle, compacting, goal, loop, heartbeat, process, …). */
+   'status.update': StatusUpdatePayload
++  /** Strict steer injection receipt; false forbids next-turn fallback. */
++  'steer.delivery': SteerDeliveryPayload
+   /** A child finished (status + observability rollup). */
+   'subagent.complete': SubagentEventPayload
+   /** Batched tool-name progress from a child. */
+@@ -6167,6 +6180,7 @@ export const GATEWAY_EVENT_TYPES = [
+   'setup.ready',
+   'skin.changed',
+   'status.update',
++  'steer.delivery',
+   'subagent.complete',
+   'subagent.progress',
+   'subagent.spawn_requested',
+diff --git a/apps/shared/src/gateway-contract.openrpc.json b/apps/shared/src/gateway-contract.openrpc.json
+index ba761e0f91..1ee1e59c86 100644
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -3613,7 +3613,7 @@
+         {
+           "name": "params",
+           "schema": {
+-            "$ref": "#/components/schemas/SessionCorrectionParams"
++            "$ref": "#/components/schemas/SessionSteerParams"
+           }
+         }
+       ],
+@@ -11614,6 +11614,7 @@
+       "CorrectionStatus": {
+         "enum": [
+           "queued",
++          "steered",
+           "redirected",
+           "rejected"
+         ],
+@@ -32684,6 +32685,54 @@
+         "title": "SessionStatusResult",
+         "type": "object"
+       },
++      "SessionSteerParams": {
++        "additionalProperties": false,
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "profile": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Profile"
++          },
++          "text": {
++            "title": "Text",
++            "type": "string"
++          },
++          "strict": {
++            "default": false,
++            "title": "Strict",
++            "type": "boolean"
++          },
++          "steer_id": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Steer Id"
++          }
++        },
++        "required": [
++          "session_id",
++          "text"
++        ],
++        "title": "SessionSteerParams",
++        "type": "object"
++      },
+       "SessionTitleParams": {
+         "additionalProperties": false,
+         "properties": {
+@@ -35598,6 +35647,25 @@
+         "title": "StatusUpdatePayload",
+         "type": "object"
+       },
++      "SteerDeliveryPayload": {
++        "additionalProperties": false,
++        "properties": {
++          "steer_id": {
++            "title": "Steer Id",
++            "type": "string"
++          },
++          "delivered": {
++            "title": "Delivered",
++            "type": "boolean"
++          }
++        },
++        "required": [
++          "steer_id",
++          "delivered"
++        ],
++        "title": "SteerDeliveryPayload",
++        "type": "object"
++      },
+       "SteerStatus": {
+         "enum": [
+           "queued",
+@@ -41783,6 +41851,18 @@
+         }
+       ]
+     },
++    {
++      "name": "steer.delivery",
++      "summary": "Strict steer injection receipt; false forbids next-turn fallback.",
++      "params": [
++        {
++          "name": "payload",
++          "schema": {
++            "$ref": "#/components/schemas/SteerDeliveryPayload"
++          }
++        }
++      ]
++    },
+     {
+       "name": "subagent.complete",
+       "summary": "A child finished (status + observability rollup).",
+diff --git a/locales/_keys.desktop.json b/locales/_keys.desktop.json
+index dff9e8dc86..1de0995268 100644
+--- a/locales/_keys.desktop.json
++++ b/locales/_keys.desktop.json
+@@ -965,11 +965,15 @@
+     "composer.speakingResponse",
+     "composer.startVoice",
+     "composer.steer",
++    "composer.steerKeyHint",
+     "composer.stop",
+     "composer.stopDictation",
+     "composer.stopListening",
+     "composer.stopShort",
+     "composer.stopSpeakingReplies",
++    "composer.strictSteerAccepted",
++    "composer.strictSteerFailed",
++    "composer.strictSteerPending",
+     "composer.terminalSelectionMissingBody",
+     "composer.terminalSelectionMissingTitle",
+     "composer.themeSuggestions",
+diff --git a/tests/agent/test_lock_fallback_base_semantics.py b/tests/agent/test_lock_fallback_base_semantics.py
+index cfd8954b6a..f8c5bb290f 100644
+--- a/tests/agent/test_lock_fallback_base_semantics.py
++++ b/tests/agent/test_lock_fallback_base_semantics.py
+@@ -6,7 +6,7 @@ from unittest.mock import Mock
+ 
+ import pytest
+ 
+-from agent.agent_runtime_helpers import _requeue_pending_steer
++from agent.steer_requeue import _requeue_pending_steer
+ from agent.client_lifecycle import ClientLifecycleMixin
+ from agent.interrupt_control import InterruptControlMixin
+ 
+diff --git a/tui_gateway/contracts/events.py b/tui_gateway/contracts/events.py
+index 632f8be57c..89f5d2dd91 100644
+--- a/tui_gateway/contracts/events.py
++++ b/tui_gateway/contracts/events.py
+@@ -373,6 +373,14 @@ event("notification.show", NotificationShowPayload, doc="Show / replace a keyed
+ event("notification.clear", NotificationClearPayload, doc="Withdraw the notice with this key.")
+ 
+ 
++class SteerDeliveryPayload(Payload):
++    steer_id: str
++    delivered: bool
++
++
++event("steer.delivery", SteerDeliveryPayload, doc="Strict steer injection receipt; false forbids next-turn fallback.")
++
++
+ class TipShowPayload(Payload):
+     """``tools/tip_tool.py``."""
+ 
+diff --git a/tui_gateway/contracts/sessions.py b/tui_gateway/contracts/sessions.py
+index 10f19a975d..c475344373 100644
+--- a/tui_gateway/contracts/sessions.py
++++ b/tui_gateway/contracts/sessions.py
+@@ -621,6 +621,7 @@ method("session.interrupt", params=SessionInterruptParams, result=SessionInterru
+ 
+ class CorrectionStatus(WireEnum):
+     queued = "queued"
++    steered = "steered"
+     redirected = "redirected"
+     rejected = "rejected"
+ 
+@@ -629,12 +630,17 @@ class SessionCorrectionParams(SessionParams):
+     text: str
+ 
+ 
++class SessionSteerParams(SessionCorrectionParams):
++    strict: bool = False
++    steer_id: str | None = None
++
++
+ class SessionCorrectionResult(Result):
+     status: CorrectionStatus
+     text: str
+ 
+ 
+-method("session.steer", params=SessionCorrectionParams, result=SessionCorrectionResult,
++method("session.steer", params=SessionSteerParams, result=SessionCorrectionResult,
+        doc="Inject text into the next tool result without interrupting the turn.")
+ method("session.redirect", params=SessionCorrectionParams, result=SessionCorrectionResult,
+        doc="Redirect the active turn (queued for the next turn while the agent is still building).")
+diff --git a/tui_gateway/methods_session_interrupt.py b/tui_gateway/methods_session_interrupt.py
+index 43ba3505ed..041becd3a3 100644
+--- a/tui_gateway/methods_session_interrupt.py
++++ b/tui_gateway/methods_session_interrupt.py
+@@ -111,22 +111,27 @@ def _(rid, params: dict) -> dict:
+                 logger.debug("session.interrupt wake resume failed", exc_info=True)
+ 
+ 
+-def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status: str) -> dict:
+-    """``agent.<verb>(text)``; on acceptance record it on the live turn (mid-turn resume rebuilds the bubble)
+-    and purge queued self-copies so post-turn drain cannot re-fire the old prompt."""
++def _record_delivered_correction(session: dict, text: str) -> None:
++    with session["history_lock"]:
++        _record_inflight_correction(session, text)
++        # #84417: steer does not cancel the live original, but a server queue self-copy of that original
++        # must still not re-fire after settle (same class as redirect).
++        # #84417: purge server-queue self-duplicates of the live original so post-turn drain cannot
++        # restart the pre-correction prompt.
++        _drop_queued_duplicates_of_inflight_user(session)
++        session["last_active"] = time.time()
++
++
++def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status: str, receipt=None) -> dict:
++    """Apply a correction; strict receipts defer history/queue mutation until injection."""
+     try:
+-        accepted = getattr(session["agent"], verb)(text)
++        action = getattr(session["agent"], verb)
++        accepted = action(text, receipt) if receipt is not None else action(text)
+     except Exception as exc:
++        logger.debug("Correction action %s failed", verb, exc_info=True)
+         return _err(rid, 5000, f"{verb} failed: {exc}")
+-    if accepted:
+-        with session["history_lock"]:
+-            _record_inflight_correction(session, text)
+-            # #84417: steer does not cancel the live original, but a server queue self-copy of that original
+-            # must still not re-fire after settle (same class as redirect).
+-            # #84417: purge server-queue self-duplicates of the live original so post-turn drain cannot
+-            # restart the pre-correction prompt.
+-            _drop_queued_duplicates_of_inflight_user(session)
+-            session["last_active"] = time.time()
++    if accepted and receipt is None:
++        _record_delivered_correction(session, text)
+     return _ok(rid, {"status": accepted_status if accepted else "rejected", "text": text})
+ 
+ 
+@@ -154,6 +159,8 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
+         # drains when compression finishes (the Discord-gateway contract; mirrors the
+         # interrupt→queue demotion in gateway/run_busy.py for the channel busy path).
+         if _session_compression_in_flight(session):
++            if verb == "steer" and params.get("strict"):
++                return _ok(rid, {"status": "rejected", "text": text})
+             _enqueue_prompt(session, text, current_transport() or _stdio_transport)
+             session["last_active"] = time.time()
+             return _ok(rid, {"status": "queued", "text": text})
+@@ -163,6 +170,19 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
+         # row (#64578). 'rejected' makes the client queue it as a normal next prompt.
+         if verb == "steer" and not session.get("running"):
+             return _ok(rid, {"status": "rejected", "text": text})
++        if verb == "steer" and params.get("strict"):
++            import re
++            steer_id = params.get("steer_id") or ""
++            if not re.fullmatch(r"[a-f0-9]{32}", steer_id):
++                return _err(rid, 4002, "strict steering requires a 32-character steer_id")
++            if not callable(getattr(agent, "steer_strict", None)):
++                return _err(rid, 4010, "agent does not support strict steering receipts")
++            sid = str(params.get("session_id") or "")
++            def receipt(delivered):
++                if delivered:
++                    _record_delivered_correction(session, text)
++                _emit("steer.delivery", sid, {"steer_id": steer_id, "delivered": delivered})
++            return _apply_correction(rid, session, "steer_strict", text, "steered", receipt)
+         return _apply_correction(rid, session, verb, text, accepted_status)
+ 
+ 
+diff --git a/agent/steer_requeue.py b/agent/steer_requeue.py
+new file mode 100644
+index 0000000000..9156c56ea0
+--- /dev/null
++++ b/agent/steer_requeue.py
+@@ -0,0 +1,28 @@
++"""Restore an uncommitted safe-boundary drain without erasing strict provenance."""
++from __future__ import annotations
++
++
++def _restore_locked(agent, steer_text: str, existing) -> None:
++    # Stop/finalization already rejected this drain; never resurrect its text.
++    if getattr(agent, "_strict_steer_closed", False):
++        return
++    pending = getattr(agent, "_pending_steer_entries", [])
++    if ("\n".join(text for text, _ in pending) or None) != existing:
++        pending = [(existing, None)] if existing else []
++    drained = getattr(agent, "_drained_steer_entries", [])
++    if drained and "\n".join(text for text, _ in drained) != steer_text:
++        raise ValueError("Steering drain provenance mismatch")
++    agent._pending_steer_entries = pending + (drained or [(steer_text, None)])
++    agent._drained_steer_entries = []
++    agent._pending_steer = f"{existing}\n{steer_text}" if existing else steer_text
++
++
++def _requeue_pending_steer(agent, steer_text: str) -> None:
++    """Keep legacy lock-less test doubles and strict native drains separate."""
++    lock = getattr(agent, "_pending_steer_lock", None)
++    if lock is not None:
++        with lock:
++            # A locked native slot must exist; a malformed agent fails loudly.
++            _restore_locked(agent, steer_text, agent._pending_steer)
++    else:
++        _restore_locked(agent, steer_text, getattr(agent, "_pending_steer", None))
+diff --git a/apps/desktop/src/app/chat/composer/behavior-keys.ts b/apps/desktop/src/app/chat/composer/behavior-keys.ts
+new file mode 100644
+index 0000000000..2ede012189
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/behavior-keys.ts
+@@ -0,0 +1,107 @@
++import type { KeyboardEvent } from 'react'
++
++import { isSlashCommandText } from '@/lib/chat-runtime'
++import { behaviorKeyAction } from '@/store/composer-behavior'
++
++interface EnterOptions {
++  busy: boolean
++  disabled: boolean
++  inputDisabled: boolean
++  cardWaiting: boolean
++  queueEdit: boolean
++  readDraft: () => string
++  syncDraft: (text: string) => void
++  steerDraft: (mode: 'steer', blocked: boolean) => unknown
++  queueDraft: () => unknown
++}
++
++function isQueueKey(event: KeyboardEvent, action: string | undefined, options: EnterOptions): boolean {
++  return (
++    event.key === 'Enter' &&
++    !event.shiftKey &&
++    Boolean(
++      event.metaKey ||
++      event.ctrlKey ||
++      (action === 'queue' &&
++        !event.altKey &&
++        !options.cardWaiting &&
++        !options.queueEdit &&
++        !isSlashCommandText(options.readDraft()))
++    )
++  )
++}
++
++/** Arbitration only: the native composer still owns drafts and sending. */
++export function handleBehaviorEnter(event: KeyboardEvent, options: EnterOptions): boolean {
++  const action =
++    event.key === 'Enter' && !event.shiftKey
++      ? behaviorKeyAction({
++          key: event.key,
++          busy: options.busy,
++          ctrlKey: event.ctrlKey,
++          metaKey: event.metaKey,
++          altKey: event.altKey,
++          shiftKey: event.shiftKey
++        })
++      : undefined
++
++  if (action === 'steer') {
++    event.preventDefault()
++
++    if (!options.disabled && !options.inputDisabled && options.busy) {
++      options.syncDraft(options.readDraft())
++      options.steerDraft('steer', options.cardWaiting || options.queueEdit)
++    }
++
++    return true
++  }
++
++  if (!isQueueKey(event, action, options)) {return false}
++  event.preventDefault()
++
++  if (options.busy && !options.disabled) {
++    options.syncDraft(options.readDraft())
++    options.queueDraft()
++  }
++
++  return true
++}
++
++interface GhostOptions {
++  trigger: boolean
++  text: string
++  busy: boolean
++  cardWaiting: boolean
++  hasAttachments: boolean
++  readDraft: () => string
++  decide: (kind: 'consumed' | 'dismissed') => string | null
++  consume: (text: string) => void
++  markConsumed: () => void
++}
++
++export function handleGhostKey(event: KeyboardEvent, options: GhostOptions): boolean {
++  if (
++    options.trigger ||
++    !options.text ||
++    options.busy ||
++    options.cardWaiting ||
++    event.ctrlKey ||
++    event.metaKey ||
++    event.altKey ||
++    event.shiftKey ||
++    options.readDraft().trim() ||
++    options.hasAttachments
++  )
++    {return false}
++
++  if (event.key !== 'Tab' && event.key !== 'Escape') {return false}
++  const accepted = options.decide(event.key === 'Tab' ? 'consumed' : 'dismissed')
++
++  if (!accepted) {return false}
++  event.preventDefault()
++  options.markConsumed()
++
++  if (event.key === 'Tab') {options.consume(accepted)}
++
++  return true
++}
+diff --git a/apps/desktop/src/app/chat/composer/behavior-notices.tsx b/apps/desktop/src/app/chat/composer/behavior-notices.tsx
+new file mode 100644
+index 0000000000..ff28d61284
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/behavior-notices.tsx
+@@ -0,0 +1,52 @@
++import { Button } from '@/components/ui/button'
++import { KbdCombo } from '@/components/ui/kbd'
++import { useI18n } from '@/i18n'
++
++export function ComposerSteerHint({ canSteer, hasPayload }: { canSteer: boolean; hasPayload: boolean }) {
++  const { t } = useI18n()
++
++  if (!canSteer || !hasPayload) {return null}
++
++  return (
++    <div
++      className="flex items-center justify-end gap-1 text-[0.68rem] leading-none text-muted-foreground/70"
++      data-slot="composer-steer-hint"
++    >
++      <KbdCombo combo="mod+enter" size="sm" />
++      <span>{t.composer.steerKeyHint}</span>
++    </div>
++  )
++}
++
++export function ComposerQueueEditNotice({
++  edit,
++  prompt,
++  onExit
++}: {
++  edit: unknown
++  prompt: unknown
++  onExit: (mode: 'cancel' | 'save') => void
++}) {
++  const { t } = useI18n()
++
++  if (!edit || !prompt) {return null}
++
++  return (
++    <div className="flex items-center justify-between gap-2 rounded-lg border border-[color-mix(in_srgb,var(--dt-composer-ring)_32%,transparent)] bg-accent/18 px-2 py-1">
++      <div className="min-w-0 text-[0.7rem] text-muted-foreground/88">{t.composer.editingQueuedInComposer}</div>
++      <div className="flex shrink-0 items-center gap-1">
++        <Button
++          className="h-6 rounded-md px-2 text-[0.68rem]"
++          onClick={() => onExit('cancel')}
++          type="button"
++          variant="ghost"
++        >
++          {t.common.cancel}
++        </Button>
++        <Button className="h-6 rounded-md px-2 text-[0.68rem]" onClick={() => onExit('save')} type="button">
++          {t.common.save}
++        </Button>
++      </div>
++    </div>
++  )
++}
+diff --git a/apps/desktop/src/app/chat/composer/busy-enter-keys.test.tsx b/apps/desktop/src/app/chat/composer/busy-enter-keys.test.tsx
+new file mode 100644
+index 0000000000..c602d4eecb
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/busy-enter-keys.test.tsx
+@@ -0,0 +1,371 @@
++import { AssistantRuntimeProvider, type ThreadMessageLike, useExternalStoreRuntime } from '@assistant-ui/react'
++import { act, cleanup, fireEvent, render } from '@testing-library/react'
++import { MemoryRouter } from 'react-router'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++import { I18nProvider } from '@/i18n'
++import { clearSessionDraft, mainComposerScope } from '@/store/composer'
++import { clearQueuedPrompts, getQueuedPrompts } from '@/store/composer-queue'
++import { $notifications } from '@/store/notifications'
++
++import { markActiveComposer } from './focus'
++import { RICH_INPUT_SLOT } from './rich-editor'
++import type { ChatBarProps, ChatBarState } from './types'
++
++import { ChatBar } from './index'
++
++vi.mock('@/app/session/hooks/use-busy-input-mode', () => ({ useBusyInputMode: () => 'interrupt' }))
++
++const SESSION = 'test-busy-enter-keys'
++const deliveryListeners = new Set<(event: any) => void>()
++
++const deliveryGateway = {
++  onEvent: (fn: (event: any) => void) => {
++    deliveryListeners.add(fn)
++
++    return () => deliveryListeners.delete(fn)
++  },
++  onState: (fn: (state: string) => void) => {
++    fn('open')
++
++    return () => {}
++  }
++}
++
++async function deliverSteer(id: string, delivered = true) {
++  await act(async () => {
++    for (const fn of deliveryListeners)
++      {fn({ type: 'steer.delivery', session_id: SESSION, payload: { steer_id: id, delivered } })}
++  })
++}
++
++let removeBehavior = () => {}
++beforeEach(() => {
++  removeBehavior = registry.register({
++    id: 'busy-key-fixture',
++    source: 'plugin:neo-next-prompt',
++    area: 'composer.behavior.v2',
++    data: {
++      protocol: 2,
++      create: () => ({}),
++      keyAction: (e: {
++        key: string
++        busy: boolean
++        ctrlKey?: boolean
++        metaKey?: boolean
++        altKey?: boolean
++        shiftKey?: boolean
++      }) =>
++        e.key === 'Enter' && e.busy && !e.shiftKey && !e.altKey
++          ? e.ctrlKey || e.metaKey
++            ? 'steer'
++            : 'queue'
++          : undefined
++    }
++  })
++})
++afterEach(() => removeBehavior())
++
++const state: ChatBarState = {
++  model: { canSwitch: false, model: '', provider: '' },
++  tools: { enabled: false, label: '' },
++  voice: { enabled: false, active: false }
++}
++
++function Harness(props: Partial<ChatBarProps>) {
++  const runtime = useExternalStoreRuntime({
++    convertMessage: (message: ThreadMessageLike) => message,
++    isRunning: props.busy ?? false,
++    messages: [] as ThreadMessageLike[],
++    onNew: async () => {}
++  })
++
++  return (
++    <AssistantRuntimeProvider runtime={runtime}>
++      <MemoryRouter>
++        <I18nProvider configClient={null} initialLocale="en">
++          <ChatBar
++            busy={true}
++            disabled={false}
++            gateway={deliveryGateway as never}
++            onCancel={vi.fn()}
++            onSubmit={vi.fn(async () => true)}
++            sessionId={SESSION}
++            state={state}
++            {...props}
++          />
++        </I18nProvider>
++      </MemoryRouter>
++    </AssistantRuntimeProvider>
++  )
++}
++
++function openComposer(props: Partial<ChatBarProps> = {}) {
++  const { container } = render(<Harness {...props} />)
++  const editor = container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++  editor.tabIndex = 0
++
++  return editor
++}
++
++async function pressEnter(editor: HTMLElement, text: string, modifiers: KeyboardEventInit & { keyCode?: number } = {}) {
++  await act(async () => {
++    editor.focus()
++    // Deliberately omit input: the real handler must use the latest DOM text,
++    // even when a fast keystroke precedes the composer state's next render.
++    editor.textContent = text
++    fireEvent.keyDown(editor, { key: 'Enter', ...modifiers })
++  })
++}
++
++afterEach(() => {
++  cleanup()
++  mainComposerScope.clear()
++  clearSessionDraft(SESSION)
++  clearQueuedPrompts(SESSION)
++})
++
++describe('busy composer Enter preference', () => {
++  it('restores native Enter steering when the plugin is disabled', async () => {
++    removeBehavior()
++    const onSteer = vi.fn(async () => true)
++    const editor = openComposer({ onSteer })
++    await pressEnter(editor, 'native steering')
++    expect(onSteer).toHaveBeenCalledExactlyOnceWith('native steering')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++  it('queues plain Enter without steering or stopping the running turn', async () => {
++    const onSteer = vi.fn(async () => true)
++    const onCancel = vi.fn()
++    const editor = openComposer({ onSteer, onCancel })
++
++    await pressEnter(editor, 'follow up later')
++
++    expect(getQueuedPrompts(SESSION).map(entry => entry.text)).toEqual(['follow up later'])
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onCancel).not.toHaveBeenCalled()
++  })
++
++  it('uses Ctrl+Enter to steer the running turn instead of queueing', async () => {
++    const onSteer = vi.fn(async () => true)
++    const editor = openComposer({ onSteer })
++
++    await pressEnter(editor, 'correct this now', { ctrlKey: true })
++
++    expect(onSteer).toHaveBeenCalledExactlyOnceWith(
++      'correct this now',
++      'steer',
++      expect.stringMatching(/^[a-f0-9]{32}$/)
++    )
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it.each(['reject', 'throw'])('retains the strict draft without queueing on %s', async outcome => {
++    $notifications.set([])
++
++    const onSteer = vi.fn(async () => {
++      if (outcome === 'throw') {throw new Error('connection unavailable')}
++
++      return false
++    })
++
++    const onCancel = vi.fn()
++    const onSubmit = vi.fn(async () => true)
++    const editor = openComposer({ onSteer, onCancel, onSubmit })
++    await pressEnter(editor, 'keep this guidance', { ctrlKey: true })
++    expect(editor.textContent).toBe('keep this guidance')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++    expect(onCancel).not.toHaveBeenCalled()
++    expect(onSubmit).not.toHaveBeenCalled()
++    expect($notifications.get().at(-1)?.message).toContain('draft is kept')
++  })
++
++  it('keeps the draft after acceptance until a safe-boundary delivery receipt', async () => {
++    const editor = openComposer({ onSteer: vi.fn(async () => true) })
++    await pressEnter(editor, 'wait for actual injection', { ctrlKey: true })
++    expect(editor.textContent).toBe('wait for actual injection')
++  })
++
++  it('distinguishes a Steering ACK from the next-turn queue', async () => {
++    $notifications.set([])
++    const onSteer = vi.fn(async (..._args: unknown[]) => true)
++    const editor = openComposer({ onSteer })
++    await pressEnter(editor, 'guidance', { ctrlKey: true })
++    await deliverSteer(onSteer.mock.calls[0][2] as string)
++    expect(editor.textContent).toBe('')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++    expect($notifications.get().find(item => item.kind === 'success')?.message).toContain(
++      'not queued for the next turn'
++    )
++  })
++
++  it('keeps newer typing and deduplicates Ctrl+Enter while awaiting the ACK', async () => {
++    let resolve!: (value: boolean) => void
++
++    const onSteer = vi.fn(
++      (..._args: unknown[]) =>
++        new Promise<boolean>(done => {
++          resolve = done
++        })
++    )
++
++    const editor = openComposer({ onSteer })
++    await pressEnter(editor, 'original guidance', { ctrlKey: true })
++    expect(editor.textContent).toBe('original guidance')
++    await pressEnter(editor, 'newer draft', { ctrlKey: true })
++    expect(onSteer).toHaveBeenCalledTimes(1)
++    await act(async () => {
++      resolve(true)
++    })
++    await deliverSteer(onSteer.mock.calls[0][2] as string)
++    expect(editor.textContent).toBe('newer draft')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it('refuses slash commands on strict Ctrl+Enter without native command dispatch', async () => {
++    const onSteer = vi.fn(async () => true)
++    const onSubmit = vi.fn(async () => true)
++    const onCancel = vi.fn()
++    const editor = openComposer({ onSteer, onSubmit, onCancel })
++    await pressEnter(editor, '/stop', { ctrlKey: true })
++    expect(editor.textContent).toBe('/stop')
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onSubmit).not.toHaveBeenCalled()
++    expect(onCancel).not.toHaveBeenCalled()
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it('refuses attachments on strict Ctrl+Enter and retains both draft and attachment', async () => {
++    const onSteer = vi.fn(async () => true)
++    const editor = openComposer({ onSteer })
++    await act(async () => {
++      mainComposerScope.$attachments.set([{ name: 'fixture.png', path: '/fixture.png', kind: 'image' } as never])
++    })
++    await pressEnter(editor, 'image guidance', { ctrlKey: true })
++    expect(editor.textContent).toBe('image guidance')
++    expect(mainComposerScope.$attachments.get()).toHaveLength(1)
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it('shows the Ctrl+Enter steer hint while steerable with a payload', async () => {
++    const onSteer = vi.fn(async () => true)
++    const view = render(<Harness onSteer={onSteer} />)
++    const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++    editor.tabIndex = 0
++
++    await act(async () => {
++      editor.focus()
++      editor.textContent = 'draft text'
++      fireEvent.input(editor)
++      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
++    })
++
++    expect(view.container.querySelector('[data-slot="composer-steer-hint"]')).toBeTruthy()
++  })
++
++  it('hides the steer hint when idle', async () => {
++    const view = render(<Harness busy={false} />)
++    const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++    editor.tabIndex = 0
++
++    await act(async () => {
++      editor.focus()
++      editor.textContent = 'draft text'
++      fireEvent.input(editor)
++      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
++    })
++
++    expect(view.container.querySelector('[data-slot="composer-steer-hint"]')).toBeNull()
++  })
++
++  it('still sends plain Enter immediately while idle', async () => {
++    const onSubmit = vi.fn<ChatBarProps['onSubmit']>(async () => true)
++    const editor = openComposer({ busy: false, onSubmit })
++
++    await pressEnter(editor, 'send while idle')
++
++    expect(onSubmit).toHaveBeenCalledTimes(1)
++    expect(onSubmit.mock.calls[0]?.[0]).toBe('send while idle')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++
++  it('does not deliver the queue or stop on a second empty Enter', async () => {
++    const onSteer = vi.fn(async () => true)
++    const onCancel = vi.fn()
++    const editor = openComposer({ onSteer, onCancel })
++
++    await pressEnter(editor, 'wait for the current turn')
++    await pressEnter(editor, '')
++
++    expect(getQueuedPrompts(SESSION).map(entry => entry.text)).toEqual(['wait for the current turn'])
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onCancel).not.toHaveBeenCalled()
++  })
++
++  it.each([
++    { busy: false, shiftKey: true },
++    { busy: true, shiftKey: true },
++    { busy: true, isComposing: true },
++    { busy: true, keyCode: 229 },
++    { busy: true, disabled: true },
++    { busy: true, disabled: true, ctrlKey: true },
++    { busy: false, ctrlKey: true }
++  ])('does not send or queue for protected input %j', async ({ busy, disabled, ...modifiers }) => {
++    const onSteer = vi.fn(async () => true)
++    const onSubmit = vi.fn(async () => true)
++    const editor = openComposer({ busy, disabled, onSteer, onSubmit })
++
++    await pressEnter(editor, 'keep this draft', modifiers)
++
++    expect(onSteer).not.toHaveBeenCalled()
++    expect(onSubmit).not.toHaveBeenCalled()
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++    expect(editor.textContent).toBe('keep this draft')
++  })
++
++  it('keeps slash commands on their normal immediate path', async () => {
++    const onSubmit = vi.fn<ChatBarProps['onSubmit']>(async () => true)
++    const editor = openComposer({ onSubmit })
++
++    await pressEnter(editor, '/status')
++
++    expect(onSubmit).toHaveBeenCalledTimes(1)
++    expect(onSubmit.mock.calls[0]?.[0]).toBe('/status')
++    expect(getQueuedPrompts(SESSION)).toEqual([])
++  })
++})
++
++it('focus alone activates an inactive composer suggestion', async () => {
++  removeBehavior()
++  markActiveComposer('tile:other')
++  removeBehavior = registry.register({
++    id: 'focus-fixture',
++    source: 'plugin:neo-next-prompt',
++    area: 'composer.behavior.v2',
++    data: {
++      protocol: 2,
++      create: (env: { publish: (text: string | null) => void }) => ({
++        update: (state: { enabled: boolean; empty: boolean }) =>
++          env.publish(state.enabled && state.empty ? 'focus candidate' : null),
++        refresh: () => {},
++        decide: () => null,
++        dispose: () => {}
++      })
++    }
++  })
++  const gateway = { onEvent: () => () => {} } as never
++  const view = render(<Harness busy={false} gateway={gateway} />)
++  const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++  await act(async () => {
++    markActiveComposer('tile:other')
++    view.rerender(<Harness busy={false} gateway={gateway} state={{ ...state }} />)
++  })
++  expect(editor.getAttribute('data-next-prompt')).toBeNull()
++  await act(async () => {
++    fireEvent.focus(editor)
++  })
++  expect(editor.getAttribute('data-next-prompt')).toBe('ready')
++  markActiveComposer('main')
++})
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.test.tsx b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.test.tsx
+new file mode 100644
+index 0000000000..865566a66e
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.test.tsx
+@@ -0,0 +1,101 @@
++import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++
++import { useComposerBehavior } from './use-composer-behavior'
++const api = vi.hoisted(() => vi.fn())
++vi.mock('@/api/client', () => ({
++  hermesApiAs: api,
++  resolveOwnerNow: ({ profile }: { profile?: string }) => ({ connectionId: 'ga401', profile: profile || 'default' })
++}))
++
++let dispose = () => {}
++
++const options = {
++  gateway: {},
++  profile: 'default',
++  sessionId: 'runtime',
++  storedId: 'stored',
++  busy: false,
++  enabled: true,
++  empty: true,
++  revision: 'model:high'
++}
++
++const install = (protocol = 2) => {
++  dispose = registry.register({
++    id: 'native-bridge-test',
++    source: 'plugin:neo-next-prompt',
++    area: 'composer.behavior.v2',
++    data: {
++      protocol,
++      create: (env: any) => {
++        let started = false
++
++        return {
++          update: (s: any) => {
++            if (s.enabled && s.empty && !started) {
++              started = true
++              void env.request('/suggestion', {}).then((r: any) => env.publish(r.text))
++            }
++          },
++          decide: () => '运行回归测试',
++          refresh: () => {},
++          dispose: () => {}
++        }
++      }
++    }
++  })
++}
++
++beforeEach(() => {
++  api.mockReset()
++  api.mockResolvedValue({ text: '运行回归测试' })
++  install()
++})
++afterEach(() => {
++  cleanup()
++  dispose()
++})
++describe('scoped plugin composer host', () => {
++  it('captures profile/connection and inserts no text automatically', async () => {
++    const v = renderHook(p => useComposerBehavior(p), { initialProps: options })
++    await waitFor(() => expect(v.result.current.text).toBe('运行回归测试'))
++    expect(api.mock.calls[0][0]).toEqual({ connectionId: 'ga401', profile: 'default' })
++    expect(api.mock.calls[0][1].path).toBe('/api/plugins/neo-next-prompt/suggestion')
++    v.rerender({ ...options, empty: false })
++    expect(v.result.current.text).toBeNull()
++    v.rerender(options)
++    expect(api).toHaveBeenCalledTimes(1)
++  })
++  it('drops an old scope result after changing profile', async () => {
++    let finish: (r: unknown) => void = () => {}
++    api.mockImplementationOnce(
++      () =>
++        new Promise(r => {
++          finish = r
++        })
++    )
++    const v = renderHook(p => useComposerBehavior(p), { initialProps: options })
++    v.rerender({ ...options, profile: 'other' })
++    await waitFor(() => expect(v.result.current.text).toBe('运行回归测试'))
++    await act(async () => finish({ text: '旧会话建议' }))
++    expect(v.result.current.text).toBe('运行回归测试')
++    expect(api.mock.calls[1][0].profile).toBe('other')
++  })
++  it('does not execute an incompatible provider or publish unsafe text', async () => {
++    dispose()
++    install(3)
++    const bad = renderHook(() => useComposerBehavior(options))
++    expect(api).not.toHaveBeenCalled()
++    expect(bad.result.current.text).toBeNull()
++    bad.unmount()
++    dispose()
++    install()
++    api.mockResolvedValue({ text: 'ab\u202ecd' })
++    const v = renderHook(() => useComposerBehavior(options))
++    await waitFor(() => expect(api).toHaveBeenCalledTimes(1))
++    expect(v.result.current.text).toBeNull()
++  })
++})
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.ts b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.ts
+new file mode 100644
+index 0000000000..a224061990
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-behavior.ts
+@@ -0,0 +1,194 @@
++import { useEffect, useMemo, useState } from 'react'
++
++import { hermesApiAs, resolveOwnerNow } from '@/api/client'
++import { useContributions } from '@/contrib/react/use-contributions'
++import {
++  type BehaviorController,
++  behaviorRequestPath,
++  COMPOSER_BEHAVIOR_AREA,
++  composerBehavior
++} from '@/store/composer-behavior'
++
++interface Options {
++  gateway: unknown
++  profile?: null | string
++  sessionId?: null | string
++  storedId?: null | string
++  busy: boolean
++  enabled: boolean
++  empty: boolean
++  revision: string
++}
++
++const validText = (text: unknown): text is string =>
++  typeof text === 'string' &&
++  text.trim() === text &&
++  text.length > 0 &&
++  Array.from(text).length <= 240 &&
++  !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(text)
++
++export function useComposerBehavior({
++  gateway,
++  profile,
++  sessionId,
++  storedId,
++  busy,
++  enabled,
++  empty,
++  revision
++}: Options) {
++  const contributions = useContributions(COMPOSER_BEHAVIOR_AREA)
++  const provider = useMemo(() => composerBehavior(contributions), [contributions])
++  const { connectionId, profile: resolvedProfile } = resolveOwnerNow({ profile })
++
++  const scope = useMemo(
++    () => ({
++      owner: { connectionId, profile: resolvedProfile },
++      gateway,
++      sessionId: sessionId || '',
++      storedId: storedId || sessionId || '',
++      busy,
++      revision
++    }),
++    [gateway, connectionId, resolvedProfile, sessionId, storedId, busy, revision]
++  )
++
++  // This is an owned controller lifetime, not a mirror of reactive app state.
++  const binding = useMemo(() => ({ scope, provider, controller: null as BehaviorController | null }), [scope, provider])
++  const [value, setValue] = useState<{ binding: typeof binding; text: string } | null>(null)
++
++  useEffect(() => {
++    if (!provider || !scope.gateway) {
++      return
++    }
++
++    let disposed = false
++    const subscriptions = new Set<() => void>()
++
++    const source = scope.gateway as {
++      onEvent?: (
++        fn: (event: { type: string; session_id?: string; payload?: { running?: boolean } }) => void
++      ) => () => void
++    }
++
++    try {
++      const controller = provider.data.create({
++        context: {
++          connectionId: scope.owner.connectionId || 'local',
++          profile: scope.owner.profile || 'default',
++          sessionId: scope.sessionId,
++          storedId: scope.storedId,
++          busy: scope.busy
++        },
++        publish: text => {
++          if (!disposed) {
++            setValue(validText(text) ? { binding, text } : null)
++          }
++        },
++        request: <T>(path: string, body: unknown) => {
++          if (disposed) {
++            return Promise.reject(new Error('Composer scope disposed'))
++          }
++
++          return hermesApiAs<T>(scope.owner, {
++            path: behaviorRequestPath(provider.source || '', path),
++            method: 'POST',
++            body,
++            timeoutMs: 32_000,
++            priority: undefined
++          })
++        },
++        onSettled: listener => {
++          const off =
++            source.onEvent?.(event => {
++              if (
++                !disposed &&
++                event.type === 'session.info' &&
++                event.session_id === scope.sessionId &&
++                event.payload?.running === false
++              ) {
++                listener()
++              }
++            }) || (() => {})
++
++          subscriptions.add(off)
++
++          return () => {
++            subscriptions.delete(off)
++            off()
++          }
++        }
++      })
++
++      if (
++        !controller ||
++        !['update', 'decide', 'refresh', 'dispose'].every(
++          key => typeof controller[key as keyof BehaviorController] === 'function'
++        )
++      ) {
++        throw new Error('Invalid composer controller')
++      }
++
++      binding.controller = controller
++    } catch {
++      disposed = true
++      setValue(null)
++
++      for (const off of subscriptions) {
++        off()
++      }
++
++      subscriptions.clear()
++    }
++
++    return () => {
++      disposed = true
++
++      try {
++        binding.controller?.dispose()
++      } catch {
++        /* Extension cleanup cannot break native input. */
++      }
++
++      binding.controller = null
++
++      for (const off of subscriptions) {
++        off()
++      }
++    }
++  }, [binding, scope, provider])
++
++  useEffect(() => {
++    try {
++      binding.controller?.update({ enabled, empty })
++    } catch {
++      setValue(null)
++    }
++  }, [binding, enabled, empty])
++
++  const text = value?.binding === binding && enabled && empty && !busy ? value.text : null
++
++  return {
++    text,
++    decide: (status: 'consumed' | 'dismissed'): null | string => {
++      if (!text || !binding.controller) {
++        return null
++      }
++
++      try {
++        const result = binding.controller.decide(status)
++
++        return result === text ? result : null
++      } catch {
++        return null
++      }
++    },
++    refresh: () => {
++      try {
++        binding.controller?.refresh()
++      } catch {
++        /* Optional extension only. */
++      }
++    }
++  }
++}
+diff --git a/apps/desktop/src/app/chat/composer/hooks/use-composer-next-prompt.ts b/apps/desktop/src/app/chat/composer/hooks/use-composer-next-prompt.ts
+new file mode 100644
+index 0000000000..ce456427ca
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/hooks/use-composer-next-prompt.ts
+@@ -0,0 +1,54 @@
++import { useStore } from '@nanostores/react'
++
++import { $currentReasoningEffortWire } from '@/store/session'
++
++import { $activeComposerRevision, getActiveComposer, type markActiveComposer } from '../focus'
++import { useComposerVisible } from '../visibility'
++
++import { useComposerBehavior } from './use-composer-behavior'
++
++type Options = Omit<Parameters<typeof useComposerBehavior>[0], 'enabled' | 'revision'> & {
++  modelRevision: string
++  placeholder: string
++}
++interface Eligibility {
++  target: Parameters<typeof markActiveComposer>[0]
++  inputDisabled: boolean
++  awaitingInput: boolean
++  blockingPrompt: unknown
++  cardWaiting: boolean
++  queueEdit: unknown
++  queuedCount: number
++  trigger: unknown
++}
++
++function inputProps(text: string | null, placeholder: string) {
++  return {
++    'data-next-prompt': text ? 'ready' : undefined,
++    'data-placeholder': text || placeholder,
++    title: text ? `${text} · Tab` : undefined
++  }
++}
++
++export function useComposerNextPrompt(options: Options, eligibility: Eligibility) {
++  const visible = useComposerVisible()
++  useStore($activeComposerRevision)
++  const reasoning = useStore($currentReasoningEffortWire)
++
++  const nextPrompt = useComposerBehavior({
++    ...options,
++    revision: `${options.modelRevision}:${reasoning}`,
++    enabled:
++      visible &&
++      getActiveComposer() === eligibility.target &&
++      !eligibility.inputDisabled &&
++      !eligibility.awaitingInput &&
++      !eligibility.blockingPrompt &&
++      !eligibility.cardWaiting &&
++      !eligibility.queueEdit &&
++      eligibility.queuedCount === 0 &&
++      !eligibility.trigger
++  })
++
++  return { ...nextPrompt, inputProps: inputProps(nextPrompt.text, options.placeholder) }
++}
+diff --git a/apps/desktop/src/app/chat/composer/input-row.tsx b/apps/desktop/src/app/chat/composer/input-row.tsx
+new file mode 100644
+index 0000000000..aa2ec21647
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/input-row.tsx
+@@ -0,0 +1,44 @@
++import type { ReactNode } from 'react'
++
++import { Slot as ContribSlot } from '@/contrib/react/slot'
++import { cn } from '@/lib/utils'
++
++import { COMPOSER_AREAS } from './contrib'
++
++export function ComposerInputRow({
++  stacked,
++  contextMenu,
++  input,
++  controls
++}: {
++  stacked: boolean
++  contextMenu: ReactNode
++  input: ReactNode
++  controls: ReactNode
++}) {
++  return (
++    <div
++      className={cn(
++        'grid w-full',
++        stacked
++          ? 'grid-cols-[auto_1fr] gap-(--composer-row-gap) [grid-template-areas:"input_input"_"menu_controls"]'
++          : 'grid-cols-[auto_1fr_auto] items-center gap-(--composer-control-gap) [grid-template-areas:"menu_input_controls"]'
++      )}
++    >
++      <div className="flex translate-y-[3px] items-start gap-(--composer-control-gap) self-start [grid-area:menu]">
++        {contextMenu}
++        <ContribSlot area={COMPOSER_AREAS.leading} />
++      </div>
++      <div className="min-w-0 [grid-area:input]">{input}</div>
++      {/* `justify-end` packs contributed actions and the send cluster
++                      together on the right. The cluster must not carry its own
++                      `ml-auto`: in the stacked layout the auto margin absorbs the
++                      row's free space and pins a contributed action to the row
++                      start, detached from the cluster (#116332). */}
++      <div className="flex min-w-0 items-center justify-end gap-(--composer-control-gap) [grid-area:controls]">
++        <ContribSlot area={COMPOSER_AREAS.actions} />
++        {controls}
++      </div>
++    </div>
++  )
++}
+diff --git a/apps/desktop/src/app/chat/composer/next-prompt-keys.test.tsx b/apps/desktop/src/app/chat/composer/next-prompt-keys.test.tsx
+new file mode 100644
+index 0000000000..04f9e219cd
+--- /dev/null
++++ b/apps/desktop/src/app/chat/composer/next-prompt-keys.test.tsx
+@@ -0,0 +1,115 @@
++import { AssistantRuntimeProvider, type ThreadMessageLike, useExternalStoreRuntime } from '@assistant-ui/react'
++import { act, cleanup, fireEvent, render } from '@testing-library/react'
++import { MemoryRouter } from 'react-router'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++import { I18nProvider } from '@/i18n'
++import { clearSessionDraft, mainComposerScope } from '@/store/composer'
++import { clearQueuedPrompts } from '@/store/composer-queue'
++
++import { RICH_INPUT_SLOT } from './rich-editor'
++import type { ChatBarProps, ChatBarState } from './types'
++
++const suggestion = vi.hoisted(() => ({
++  text: '运行解析器回归测试',
++  decide: vi.fn(() => '运行解析器回归测试'),
++  refresh: vi.fn()
++}))
++
++vi.mock('./hooks/use-composer-behavior', () => ({ useComposerBehavior: () => suggestion }))
++import { ChatBar } from './index'
++const SESSION = 'next-prompt-key-test'
++
++const state: ChatBarState = {
++  model: { canSwitch: false, model: '', provider: '' },
++  tools: { enabled: false, label: '' },
++  voice: { enabled: false, active: false }
++}
++
++function Harness({ onSubmit }: { onSubmit: ChatBarProps['onSubmit'] }) {
++  const runtime = useExternalStoreRuntime({
++    convertMessage: (m: ThreadMessageLike) => m,
++    isRunning: false,
++    messages: [] as ThreadMessageLike[],
++    onNew: async () => {}
++  })
++
++  return (
++    <AssistantRuntimeProvider runtime={runtime}>
++      <MemoryRouter>
++        <I18nProvider configClient={null} initialLocale="en">
++          <ChatBar
++            busy={false}
++            disabled={false}
++            gateway={null}
++            onCancel={vi.fn()}
++            onSubmit={onSubmit}
++            sessionId={SESSION}
++            state={state}
++          />
++        </I18nProvider>
++      </MemoryRouter>
++    </AssistantRuntimeProvider>
++  )
++}
++
++const open = () => {
++  const submit = vi.fn<ChatBarProps['onSubmit']>(async () => true)
++  const view = render(<Harness onSubmit={submit} />)
++  const editor = view.container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
++  editor.tabIndex = 0
++  editor.focus()
++
++  return { editor, submit }
++}
++
++afterEach(() => {
++  cleanup()
++  mainComposerScope.clear()
++  clearSessionDraft(SESSION)
++  clearQueuedPrompts(SESSION)
++  vi.clearAllMocks()
++})
++
++describe('native next-prompt key ownership', () => {
++  it('keeps ghost text outside draft; Tab accepts, then Enter sends', async () => {
++    const { editor, submit } = open()
++    expect(editor.textContent).toBe('')
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Enter' })
++    })
++    expect(submit).not.toHaveBeenCalled()
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Tab' })
++    })
++    expect(editor.textContent).toBe(suggestion.text)
++    expect(submit).not.toHaveBeenCalled()
++    expect(suggestion.decide).toHaveBeenCalledWith('consumed')
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Enter' })
++    })
++    expect(submit).toHaveBeenCalledWith(suggestion.text, expect.anything())
++  })
++  it('does not overwrite a live keystroke before React has synchronized', async () => {
++    const { editor } = open()
++    editor.textContent = '我自己的输入'
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Tab' })
++    })
++    expect(editor.textContent).toBe('我自己的输入')
++    expect(suggestion.decide).not.toHaveBeenCalled()
++  })
++  it('yields to composition and Shift+Tab; Esc dismisses without stopping', async () => {
++    const { editor, submit } = open()
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Tab', isComposing: true })
++      fireEvent.keyDown(editor, { key: 'Tab', shiftKey: true })
++    })
++    expect(suggestion.decide).not.toHaveBeenCalled()
++    await act(async () => {
++      fireEvent.keyDown(editor, { key: 'Escape' })
++    })
++    expect(suggestion.decide).toHaveBeenCalledWith('dismissed')
++    expect(submit).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/desktop/src/app/session/hooks/use-prompt-actions/strict-steering.test.tsx b/apps/desktop/src/app/session/hooks/use-prompt-actions/strict-steering.test.tsx
+new file mode 100644
+index 0000000000..840d1cf8c5
+--- /dev/null
++++ b/apps/desktop/src/app/session/hooks/use-prompt-actions/strict-steering.test.tsx
+@@ -0,0 +1,74 @@
++import { cleanup } from '@testing-library/react'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++import { actRender, Harness, type HarnessHandle, RUNTIME_SESSION_ID } from './prompt-actions-harness'
++
++vi.mock('@/hermes', () => ({
++  getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: 'session' })),
++  getProfiles: vi.fn(async () => ({ profiles: [] })),
++  getSession: vi.fn(),
++  PROMPT_SUBMIT_REQUEST_TIMEOUT_MS: 1_800_000,
++  setApiRequestProfile: vi.fn(),
++  transcribeAudio: vi.fn()
++}))
++
++vi.mock('@/store/gateway', async importOriginal => ({
++  ...(await importOriginal<Record<string, unknown>>()),
++  requestGatewayForAgent: vi.fn()
++}))
++
++afterEach(() => {
++  cleanup()
++  vi.restoreAllMocks()
++})
++
++describe('strict composer steering RPC', () => {
++  it('sends explicit composer steering through session.steer without an interrupt bubble', async () => {
++    const requestGateway = vi.fn(async () => ({ status: 'steered' }) as never)
++    let handle: HarnessHandle | null = null
++    const capturedStates: Record<string, unknown>[] = []
++    await actRender(
++      <Harness
++        onReady={h => (handle = h)}
++        onSeedState={state => capturedStates.push(state)}
++        refreshSessions={async () => undefined}
++        requestGateway={requestGateway}
++      />
++    )
++
++    expect(await handle!.steerPrompt('  steer safely  ', 'steer', 'a'.repeat(32))).toBe(true)
++    expect(requestGateway).toHaveBeenCalledWith('session.steer', {
++      session_id: RUNTIME_SESSION_ID,
++      text: 'steer safely',
++      strict: true,
++      steer_id: 'a'.repeat(32)
++    })
++    expect(requestGateway).not.toHaveBeenCalledWith('session.redirect', expect.anything())
++    expect(capturedStates).toEqual([])
++  })
++
++  it.each(['queued', 'rejected', 'missing'])(
++    'strict steering refuses %s without recovery or fallback RPC',
++    async status => {
++      const requestGateway = vi.fn(async () => {
++        if (status === 'missing') {
++          throw new Error('session not found')
++        }
++
++        return { status } as never
++      })
++
++      let handle: HarnessHandle | null = null
++      await actRender(
++        <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
++      )
++      expect(await handle!.steerPrompt('retain me', 'steer', 'a'.repeat(32))).toBe(false)
++      expect(requestGateway).toHaveBeenCalledExactlyOnceWith('session.steer', {
++        session_id: RUNTIME_SESSION_ID,
++        text: 'retain me',
++        strict: true,
++        steer_id: 'a'.repeat(32)
++      })
++    }
++  )
++})
+diff --git a/apps/desktop/src/i18n/de_steering.ts b/apps/desktop/src/i18n/de_steering.ts
+new file mode 100644
+index 0000000000..2b0cc0708f
+--- /dev/null
++++ b/apps/desktop/src/i18n/de_steering.ts
+@@ -0,0 +1,12 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: Partial<ComposerSteeringCopy> = {
++  strictSteerAccepted: 'Steering an einer sicheren Grenze eingefügt; nicht für die nächste Runde eingereiht.',
++  strictSteerFailed:
++    'Steering nicht bestätigt. Der Entwurf bleibt erhalten; keine automatische Warteschlange oder Unterbrechung. Bei Verbindungsfehlern vor dem Wiederholen die Zustellung prüfen.',
++  strictSteerPending: 'Steering wartet auf Bestätigung. Der Entwurf bleibt erhalten.',
++  queueMessage: 'Nachricht einreihen',
++  steer: 'Laufenden Lauf steuern',
++  steerKeyHint: 'Laufenden Lauf steuern (Ctrl+Enter)',
++  stop: 'Stopp'
++}
+diff --git a/apps/desktop/src/i18n/en_steering.ts b/apps/desktop/src/i18n/en_steering.ts
+new file mode 100644
+index 0000000000..5ccaf9a4f3
+--- /dev/null
++++ b/apps/desktop/src/i18n/en_steering.ts
+@@ -0,0 +1,12 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: ComposerSteeringCopy = {
++  strictSteerAccepted: 'Steering injected at a safe boundary; not queued for the next turn.',
++  strictSteerFailed:
++    'Steering not confirmed. Your draft is kept; no automatic queue or interruption. If the connection failed, check delivery before retrying.',
++  strictSteerPending: 'Steering is awaiting confirmation. Your draft is kept.',
++  queueMessage: 'Queue message',
++  steer: 'Steer the current run',
++  steerKeyHint: 'Steer the running turn',
++  stop: 'Stop'
++}
+diff --git a/apps/desktop/src/i18n/es_steering.ts b/apps/desktop/src/i18n/es_steering.ts
+new file mode 100644
+index 0000000000..daf81a41bd
+--- /dev/null
++++ b/apps/desktop/src/i18n/es_steering.ts
+@@ -0,0 +1,12 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: Partial<ComposerSteeringCopy> = {
++  strictSteerAccepted: 'Steering insertado en un punto seguro; no está en cola para el siguiente turno.',
++  strictSteerFailed:
++    'Steering sin confirmar. Se conserva el borrador; no se encola ni se interrumpe automáticamente. Si falla la conexión, comprueba la entrega antes de reintentar.',
++  strictSteerPending: 'Steering espera confirmación. Se conserva el borrador.',
++  queueMessage: 'Poner mensaje en cola',
++  steer: 'Guiar la ejecución actual',
++  steerKeyHint: 'Guiar la ejecución actual (Ctrl+Enter)',
++  stop: 'Detener'
++}
+diff --git a/apps/desktop/src/i18n/fr_steering.ts b/apps/desktop/src/i18n/fr_steering.ts
+new file mode 100644
+index 0000000000..10d36efe72
+--- /dev/null
++++ b/apps/desktop/src/i18n/fr_steering.ts
+@@ -0,0 +1,12 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: Partial<ComposerSteeringCopy> = {
++  strictSteerAccepted: 'Steering injecté à une frontière sûre ; pas mis en file pour le prochain tour.',
++  strictSteerFailed:
++    'Steering non confirmé. Le brouillon est conservé ; aucune mise en file ou interruption automatique. En cas de perte de connexion, vérifiez la livraison avant de réessayer.',
++  strictSteerPending: 'Steering attend une confirmation. Le brouillon est conservé.',
++  queueMessage: "Mettre le message en file d'attente",
++  steer: "Diriger l'exécution en cours",
++  steerKeyHint: "Diriger l'exécution en cours (Ctrl+Entrée)",
++  stop: 'Arrêter'
++}
+diff --git a/apps/desktop/src/i18n/ja_steering.ts b/apps/desktop/src/i18n/ja_steering.ts
+new file mode 100644
+index 0000000000..e25f4743ce
+--- /dev/null
++++ b/apps/desktop/src/i18n/ja_steering.ts
+@@ -0,0 +1,11 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: Partial<ComposerSteeringCopy> = {
++  strictSteerAccepted: '安全な境界で Steering を挿入しました。次のターンのキューではありません。',
++  strictSteerFailed:
++    'Steering を確認できませんでした。下書きを保持し、自動でキュー追加や中断は行いません。接続エラーの場合は再試行前に配信状況を確認してください。',
++  strictSteerPending: 'Steering の確認待ちです。下書きは保持されています。',
++  queueMessage: 'メッセージをキューに入れる',
++  steerKeyHint: '実行中のターンを指示（Ctrl+Enter）',
++  stop: '停止'
++}
+diff --git a/apps/desktop/src/i18n/ru_steering.ts b/apps/desktop/src/i18n/ru_steering.ts
+new file mode 100644
+index 0000000000..0daf00369b
+--- /dev/null
++++ b/apps/desktop/src/i18n/ru_steering.ts
+@@ -0,0 +1,12 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: Partial<ComposerSteeringCopy> = {
++  strictSteerAccepted: 'Steering вставлен на безопасной границе; не поставлен в очередь следующего хода.',
++  strictSteerFailed:
++    'Steering не подтверждён. Черновик сохранён; автоматической очереди или прерывания нет. При сбое соединения перед повтором проверьте доставку.',
++  strictSteerPending: 'Steering ожидает подтверждения. Черновик сохранён.',
++  queueMessage: 'Вставить сообщение в очередь',
++  steer: 'Направить текущий запуск',
++  steerKeyHint: 'Направить текущий запуск (Ctrl+Enter)',
++  stop: 'Стоп'
++}
+diff --git a/apps/desktop/src/i18n/types_steering.ts b/apps/desktop/src/i18n/types_steering.ts
+new file mode 100644
+index 0000000000..f7f9cdd57e
+--- /dev/null
++++ b/apps/desktop/src/i18n/types_steering.ts
+@@ -0,0 +1,9 @@
++export interface ComposerSteeringCopy {
++  strictSteerAccepted: string
++  strictSteerFailed: string
++  strictSteerPending: string
++  queueMessage: string
++  steer: string
++  steerKeyHint: string
++  stop: string
++}
+diff --git a/apps/desktop/src/i18n/zh_steering.ts b/apps/desktop/src/i18n/zh_steering.ts
+new file mode 100644
+index 0000000000..9083689de3
+--- /dev/null
++++ b/apps/desktop/src/i18n/zh_steering.ts
+@@ -0,0 +1,11 @@
++import type { ComposerSteeringCopy } from './types_steering'
++
++export const steeringCopy: Partial<ComposerSteeringCopy> = {
++  strictSteerAccepted: '已 Steering：已在安全边界注入，不是下一轮排队。',
++  strictSteerFailed: 'Steering 未获确认。草稿已保留，不会自动排队或中断；如遇连接异常，请先核对是否送达再重试。',
++  strictSteerPending: 'Steering 正在等待确认，草稿暂时保留。',
++  queueMessage: '排队消息',
++  steer: '引导当前运行',
++  steerKeyHint: '转向当前回合',
++  stop: '停止'
++}
+diff --git a/apps/desktop/src/lib/strict-steering.test.ts b/apps/desktop/src/lib/strict-steering.test.ts
+new file mode 100644
+index 0000000000..251c700221
+--- /dev/null
++++ b/apps/desktop/src/lib/strict-steering.test.ts
+@@ -0,0 +1,119 @@
++import { describe, expect, it, vi } from 'vitest'
++
++import type { HermesGateway } from '@/hermes'
++
++import { strictSteerDelivery } from './strict-steering'
++
++function source() {
++  const listeners = new Set<(event: any) => void>()
++  const states = new Set<(state: any) => void>()
++
++  const gateway = {
++    onEvent: (fn: (event: any) => void) => {
++      listeners.add(fn)
++
++      return () => listeners.delete(fn)
++    },
++    onState: (fn: (state: any) => void) => {
++      states.add(fn)
++      fn('open')
++
++      return () => states.delete(fn)
++    }
++  } as unknown as HermesGateway
++
++  return {
++    gateway,
++    listeners,
++    states,
++    emit: (event: any) => {
++      for (const fn of listeners) {fn(event)}
++    }
++  }
++}
++
++describe('strict safe-boundary receipts', () => {
++  it('does not resolve on ACK; a matching injection resolves and cleans up', async () => {
++    const s = source()
++    let id = ''
++    const done = vi.fn()
++
++    const p = strictSteerDelivery(
++      s.gateway,
++      's',
++      value => {
++        id = value
++
++        return true
++      },
++      new AbortController().signal
++    )
++
++    void p.then(done)
++    await Promise.resolve()
++    expect(done).not.toHaveBeenCalled()
++    s.emit({ type: 'steer.delivery', session_id: 'other', payload: { steer_id: id, delivered: true } })
++    s.emit({ type: 'steer.delivery', session_id: 's', payload: { steer_id: 'wrong', delivered: true } })
++    await Promise.resolve()
++    expect(done).not.toHaveBeenCalled()
++    s.emit({ type: 'steer.delivery', session_id: 's', payload: { steer_id: id, delivered: true } })
++    expect(await p).toBe(true)
++    expect(s.listeners.size + s.states.size).toBe(0)
++  })
++
++  it('accepts an injection receipt that beats the ACK', async () => {
++    const s = source()
++    let ack!: (value: boolean) => void
++
++    const p = strictSteerDelivery(
++      s.gateway,
++      's',
++      id => {
++        s.emit({ type: 'steer.delivery', session_id: 's', payload: { steer_id: id, delivered: true } })
++
++        return new Promise<boolean>(resolve => {
++          ack = resolve
++        })
++      },
++      new AbortController().signal
++    )
++
++    expect(await p).toBe(true)
++    ack(false)
++    expect(s.listeners.size + s.states.size).toBe(0)
++  })
++
++  it.each(['rejected', 'settled', 'disconnected', 'aborted'])(
++    'retains the draft on %s (caller owns it)',
++    async reason => {
++      const s = source()
++      const controller = new AbortController()
++      let id = ''
++
++      const p = strictSteerDelivery(
++        s.gateway,
++        's',
++        value => {
++          id = value
++
++          return true
++        },
++        controller.signal
++      )
++
++      const actions: Record<string, () => void> = {
++        rejected: () =>
++          s.emit({ type: 'steer.delivery', session_id: 's', payload: { steer_id: id, delivered: false } }),
++        settled: () => s.emit({ type: 'session.info', session_id: 's', payload: { running: false } }),
++        disconnected: () => {
++          for (const fn of s.states) {fn('connecting')}
++        },
++        aborted: () => controller.abort()
++      }
++
++      actions[reason]()
++      expect(await p).toBe(false)
++      expect(s.listeners.size + s.states.size).toBe(0)
++    }
++  )
++})
+diff --git a/apps/desktop/src/lib/strict-steering.ts b/apps/desktop/src/lib/strict-steering.ts
+new file mode 100644
+index 0000000000..a746185136
+--- /dev/null
++++ b/apps/desktop/src/lib/strict-steering.ts
+@@ -0,0 +1,63 @@
++import type { HermesGateway } from '@/hermes'
++
++/** The subscription is installed before send: a tool boundary can beat the RPC ACK.
++ * Unknown/closed transports fail closed; no automatic retry, queue, or redirect. */
++export function strictSteerDelivery(
++  gateway: HermesGateway | null | undefined,
++  sessionId: string | null | undefined,
++  send: (id: string) => Promise<boolean> | boolean,
++  signal: AbortSignal
++): Promise<boolean> {
++  if (!gateway?.onEvent || !gateway.onState || !sessionId || signal.aborted) {return Promise.resolve(false)}
++  const steerId = crypto.randomUUID().replaceAll('-', '')
++
++  return new Promise(resolve => {
++    let settled = false
++    const disposers: (() => void)[] = []
++
++    const finish = (delivered: boolean) => {
++      if (settled) {return}
++      settled = true
++
++      for (const off of disposers) {off()}
++      signal.removeEventListener('abort', aborted)
++      resolve(delivered)
++    }
++
++    const aborted = () => finish(false)
++    disposers.push(
++      gateway.onEvent(event => {
++        if (event.session_id !== sessionId) {return}
++        const payload = event.payload as { steer_id?: string; delivered?: boolean; running?: boolean } | undefined
++
++        if (event.type === 'steer.delivery' && payload?.steer_id === steerId) {finish(payload.delivered === true)}
++
++        if (event.type === 'session.info' && payload?.running === false) {finish(false)}
++      })
++    )
++
++    const offState = gateway.onState(state => {
++      if (state !== 'open') {finish(false)}
++    })
++
++    if (settled) {
++      offState()
++
++      return
++    }
++
++    disposers.push(offState)
++    signal.addEventListener('abort', aborted, { once: true })
++
++    // Invoke synchronously to freeze the owner before another UI action can run.
++    try {
++      void Promise.resolve(send(steerId))
++        .then(accepted => {
++          if (!accepted) {finish(false)}
++        })
++        .catch(() => finish(false))
++    } catch {
++      finish(false)
++    }
++  })
++}
+diff --git a/apps/desktop/src/store/composer-behavior.test.ts b/apps/desktop/src/store/composer-behavior.test.ts
+new file mode 100644
+index 0000000000..13c07a0e75
+--- /dev/null
++++ b/apps/desktop/src/store/composer-behavior.test.ts
+@@ -0,0 +1,58 @@
++import { afterEach, describe, expect, it } from 'vitest'
++
++import { registry } from '@/contrib/registry'
++
++import {
++  behaviorKeyAction,
++  behaviorKeys,
++  behaviorRequestPath,
++  composerBehavior,
++  notifyBehaviorLifecycle
++} from './composer-behavior'
++const off: (() => void)[] = []
++
++const add = (data: unknown, source = 'plugin:neo-next-prompt') =>
++  off.push(registry.register({ id: `test-${off.length}`, source, area: 'composer.behavior.v2', data }))
++
++afterEach(() => {
++  while (off.length) {
++    off.pop()?.()
++  }
++})
++describe('minimal composer bridge contract', () => {
++  it('uses native behavior when absent, wrong protocol, ambiguous or provider throws', () => {
++    expect(composerBehavior()).toBeUndefined()
++    add({ protocol: 3, create: () => ({}) })
++    expect(composerBehavior()).toBeUndefined()
++    add({
++      protocol: 2,
++      create: () => ({}),
++      keyAction: () => {
++        throw Error('fixture')
++      }
++    })
++    expect(behaviorKeyAction({ key: 'Enter', busy: true })).toBeUndefined()
++    add({ protocol: 2, create: () => ({}) })
++    expect(composerBehavior()).toBeUndefined()
++  })
++  it('routes only validated actions and read-only key labels', () => {
++    add({ protocol: 2, create: () => ({}), keyAction: () => 'queue', readOnlyKeys: { 'composer.queue': ['enter'] } })
++    expect(behaviorKeyAction({ key: 'Enter', busy: true })).toBe('queue')
++    expect(behaviorKeys('composer.queue', ['mod+enter'])).toEqual(['enter'])
++  })
++  it('binds REST namespace to registry provenance and rejects escape/query paths', () => {
++    expect(behaviorRequestPath('plugin:neo-next-prompt', '/suggestion')).toBe('/api/plugins/neo-next-prompt/suggestion')
++
++    for (const path of ['/../config', '/%2e%2e/config', '/suggestion?profile=other', 'https://example.invalid']) {
++      expect(() => behaviorRequestPath('plugin:neo-next-prompt', path)).toThrow()
++    }
++
++    expect(() => behaviorRequestPath('core', '/suggestion')).toThrow()
++  })
++  it('delivers profile cleanup to the plugin instead of owning its storage', () => {
++    const events: unknown[] = []
++    add({ protocol: 2, create: () => ({}), lifecycle: (event: unknown) => events.push(event) })
++    notifyBehaviorLifecycle({ kind: 'drop', profile: 'default', connectionId: 'ga401' })
++    expect(events).toEqual([{ kind: 'drop', profile: 'default', connectionId: 'ga401' }])
++  })
++})
+diff --git a/apps/desktop/src/store/composer-behavior.ts b/apps/desktop/src/store/composer-behavior.ts
+new file mode 100644
+index 0000000000..7fbbbc834b
+--- /dev/null
++++ b/apps/desktop/src/store/composer-behavior.ts
+@@ -0,0 +1,87 @@
++import { registry } from '@/contrib/registry'
++import type { Contribution } from '@/contrib/types'
++
++export const COMPOSER_BEHAVIOR_VERSION = 2
++export const COMPOSER_BEHAVIOR_AREA = 'composer.behavior.v2'
++export interface BehaviorContext {
++  connectionId: string
++  profile: string
++  sessionId: string
++  storedId: string
++  busy: boolean
++}
++export interface BehaviorKey {
++  key: string
++  busy: boolean
++  ctrlKey?: boolean
++  metaKey?: boolean
++  altKey?: boolean
++  shiftKey?: boolean
++}
++export type BehaviorLifecycle =
++  { kind: 'drop'; profile: string; connectionId: string } | { kind: 'rename'; from: string; to: string }
++export interface BehaviorController {
++  update: (state: { enabled: boolean; empty: boolean }) => void
++  decide: (status: 'consumed' | 'dismissed') => null | string
++  refresh: () => void
++  dispose: () => void
++}
++export interface BehaviorEnvironment {
++  context: BehaviorContext
++  publish: (text: null | string) => void
++  request: <T>(path: string, body: unknown) => Promise<T>
++  onSettled: (listener: () => void) => () => void
++}
++export interface ComposerBehavior {
++  protocol: 2
++  create: (environment: BehaviorEnvironment) => BehaviorController
++  keyAction?: (event: BehaviorKey) => 'queue' | 'steer' | undefined
++  readOnlyKeys?: Record<string, readonly string[]>
++  lifecycle?: (event: BehaviorLifecycle) => void
++}
++
++export function composerBehavior(contributions: readonly Contribution[] = registry.getArea(COMPOSER_BEHAVIOR_AREA)) {
++  const providers = contributions.filter(item => {
++    const data = item.data as Partial<ComposerBehavior> | undefined
++
++    return (
++      /^plugin:[a-z0-9][a-z0-9_-]*$/.test(item.source || '') &&
++      data?.protocol === 2 &&
++      typeof data.create === 'function'
++    )
++  })
++
++  return providers.length === 1 ? (providers[0] as (typeof providers)[number] & { data: ComposerBehavior }) : undefined
++}
++
++export function behaviorRequestPath(source: string, path: string): string {
++  if (!/^plugin:[a-z0-9][a-z0-9_-]*$/.test(source) || !/^\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path)) {
++    throw new Error('Invalid composer extension namespace/path')
++  }
++
++  return `/api/plugins/${source.slice(7)}${path}`
++}
++
++export function behaviorKeyAction(event: BehaviorKey): 'queue' | 'steer' | undefined {
++  try {
++    const result = composerBehavior()?.data.keyAction?.(event)
++
++    return result === 'queue' || result === 'steer' ? result : undefined
++  } catch {
++    return undefined
++  }
++}
++
++export function behaviorKeys(id: string, fallback: readonly string[]): readonly string[] {
++  const keys = composerBehavior()?.data.readOnlyKeys?.[id]
++
++  return Array.isArray(keys) && keys.length > 0 && keys.every(key => typeof key === 'string') ? keys : fallback
++}
++
++export function notifyBehaviorLifecycle(event: BehaviorLifecycle): void {
++  try {
++    composerBehavior()?.data.lifecycle?.(event)
++  } catch {
++    /* A plugin cannot break native profile operations. */
++  }
++}
+diff --git a/apps/desktop/src/store/session-states_reply.ts b/apps/desktop/src/store/session-states_reply.ts
+new file mode 100644
+index 0000000000..5db7e31173
+--- /dev/null
++++ b/apps/desktop/src/store/session-states_reply.ts
+@@ -0,0 +1,21 @@
++import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
++
++export function turnHasReply(messages: ChatMessage[]): boolean {
++  for (let index = messages.length - 1; index >= 0; index -= 1) {
++    const message = messages[index]
++
++    if (message.hidden) {
++      continue
++    }
++
++    if (message.role === 'user') {
++      return false
++    }
++
++    if (message.role === 'assistant' && (message.error || chatMessageText(message).trim())) {
++      return true
++    }
++  }
++
++  return false
++}
+diff --git a/tests/agent/test_strict_steer_current_boundary.py b/tests/agent/test_strict_steer_current_boundary.py
+new file mode 100644
+index 0000000000..2c90421cd5
+--- /dev/null
++++ b/tests/agent/test_strict_steer_current_boundary.py
+@@ -0,0 +1,85 @@
++"""Strict pre-API delivery must append, never rewrite a historical tool boundary."""
++import copy
++from unittest.mock import Mock
++from typing import Any
++
++from agent.agent_runtime_helpers import apply_pending_steer_to_tool_results
++from agent.interrupt_control import InterruptControlMixin
++from agent.turn_iteration_prep import prepare_iteration
++
++
++def _agent(receipt, mixed=False):
++    agent: Any = InterruptControlMixin()
++    agent.session_id = 'strict-boundary-fixture'
++    agent._skill_nudge_interval = 0
++    agent.run_budget_seconds = 0
++    agent._adopt_nous_key_before_expiry = lambda: None
++    agent._sanitize_tool_call_arguments = lambda *args, **kwargs: 0
++
++    def incoming(*_):
++        if mixed:
++            agent.steer('legacy first')
++        assert agent.steer_strict('fresh guidance', receipt)
++        if mixed:
++            agent.steer('legacy last')
++
++    agent.step_callback = incoming
++    return agent
++
++
++def _tool_round(name):
++    return [
++        {'role': 'assistant', 'tool_calls': [
++            {'id': name, 'type': 'function', 'function': {'name': 'terminal', 'arguments': '{}'}}
++        ]},
++        {'role': 'tool', 'tool_call_id': name, 'content': name + ' result'},
++    ]
++
++
++def test_strict_first_iteration_preserves_the_historical_prefix_until_a_current_tool_boundary():
++    receipt = Mock()
++    agent = _agent(receipt)
++    messages = [{'role': 'user', 'content': 'previous user'}, *_tool_round('previous'),
++                {'role': 'assistant', 'content': 'previous final'},
++                {'role': 'user', 'content': 'fresh user'}]
++    before = copy.deepcopy(messages)
++    result = prepare_iteration(agent, messages=messages, api_call_count=0,
++                               user_message='fresh user', current_turn_user_idx=4)
++    assert result.messages == before, 'Steering rewrote cached history before the fresh user row'
++    receipt.assert_not_called()
++    assert agent._pending_steer == 'fresh guidance'
++    messages.extend(_tool_round('current'))
++    apply_pending_steer_to_tool_results(agent, messages, 1)
++    receipt.assert_called_once_with(True)
++    assert messages[:len(before)] == before
++    assert messages[-1]['display_kind'] == 'steer'
++    assert 'fresh guidance' in messages[-1]['content']
++
++
++def test_mixed_fifo_waits_together_instead_of_sending_legacy_text_past_strict_guidance():
++    receipt = Mock()
++    agent = _agent(receipt, mixed=True)
++    messages = [{'role': 'user', 'content': 'old'}, *_tool_round('old'),
++                {'role': 'assistant', 'content': 'done'}, {'role': 'user', 'content': 'fresh'}]
++    before = copy.deepcopy(messages)
++    prepare_iteration(agent, messages=messages, api_call_count=0,
++                      user_message='fresh', current_turn_user_idx=4)
++    assert messages == before
++    receipt.assert_not_called()
++    messages.extend(_tool_round('new'))
++    apply_pending_steer_to_tool_results(agent, messages, 1)
++    assert 'legacy first\nfresh guidance\nlegacy last' in messages[-1]['content']
++    receipt.assert_called_once_with(True)
++
++
++def test_a_tool_result_at_the_tail_allows_append_only_pre_api_delivery():
++    receipt = Mock()
++    agent = _agent(receipt)
++    messages = [{'role': 'user', 'content': 'current'}, *_tool_round('current')]
++    before = copy.deepcopy(messages)
++    prepare_iteration(agent, messages=messages, api_call_count=1,
++                      user_message='current', current_turn_user_idx=0)
++    assert messages[:len(before)] == before
++    assert len(messages) == len(before) + 1
++    assert messages[-1]['display_kind'] == 'steer'
++    receipt.assert_called_once_with(True)
+diff --git a/tests/agent/test_strict_steer_delivery.py b/tests/agent/test_strict_steer_delivery.py
+new file mode 100644
+index 0000000000..b4006a3ef8
+--- /dev/null
++++ b/tests/agent/test_strict_steer_delivery.py
+@@ -0,0 +1,68 @@
++"""Strict steer receipts acknowledge injection, never a next-turn fallback."""
++from unittest.mock import Mock
++
++from agent.interrupt_control import InterruptControlMixin
++
++
++def test_strict_receipt_waits_for_committed_injection():
++    agent = InterruptControlMixin()
++    receipt = Mock()
++    assert agent.steer_strict('guidance', receipt)
++    receipt.assert_not_called()
++    assert agent._drain_pending_steer() == 'guidance'
++    receipt.assert_not_called()
++    agent.commit_steer_delivery()
++    receipt.assert_called_once_with(True)
++
++
++def test_turn_end_rejects_strict_only_and_preserves_legacy_fifo():
++    agent = InterruptControlMixin()
++    receipt = Mock()
++    agent.steer('legacy first')
++    agent.steer_strict('strict middle', receipt)
++    agent.steer('legacy last')
++    agent.reject_pending_strict_steer()
++    receipt.assert_called_once_with(False)
++    assert agent._drain_pending_steer() == 'legacy first\nlegacy last'
++
++
++def test_finalization_fence_rejects_a_late_call_and_next_turn_drops_old_strict():
++    agent = InterruptControlMixin()
++    receipt = Mock()
++    agent.steer_strict('old turn', receipt)
++    agent.open_strict_steering()
++    receipt.assert_called_once_with(False)
++    assert agent._drain_pending_steer() is None
++    agent.reject_pending_strict_steer()
++    assert agent.steer_strict('too late', Mock()) is False
++    assert agent._drain_pending_steer() is None
++    agent.open_strict_steering()
++    assert agent.steer_strict('new turn', Mock()) is True
++
++
++def test_requeue_keeps_strict_provenance_and_legacy_fifo():
++    from agent.steer_requeue import _requeue_pending_steer
++    agent = InterruptControlMixin()
++    receipt = Mock()
++    agent.steer('first legacy')
++    agent.steer_strict('must not cross turns', receipt)
++    agent.steer('last legacy')
++    drained = agent._drain_pending_steer()
++    assert drained is not None
++    _requeue_pending_steer(agent, drained)
++    agent.reject_pending_strict_steer()
++    receipt.assert_called_once_with(False)
++    assert agent._drain_pending_steer() == 'first legacy\nlast legacy'
++
++
++def test_a_closed_drain_cannot_be_requeued_after_stop():
++    from agent.steer_requeue import _requeue_pending_steer
++    agent = InterruptControlMixin()
++    receipt = Mock()
++    agent.steer_strict('stopped guidance', receipt)
++    drained = agent._drain_pending_steer()
++    assert drained is not None
++    agent.reject_pending_strict_steer()
++    _requeue_pending_steer(agent, drained)
++    receipt.assert_called_once_with(False)
++    assert agent._drain_pending_steer() is None
+diff --git a/tests/tui_gateway/test_strict_steering.py b/tests/tui_gateway/test_strict_steering.py
+new file mode 100644
+index 0000000000..c484dd752e
+--- /dev/null
++++ b/tests/tui_gateway/test_strict_steering.py
+@@ -0,0 +1,68 @@
++"""Strict steering never demotes to the next-turn queue or interrupts."""
++import threading
++from types import SimpleNamespace
++from unittest.mock import ANY, Mock
++
++import pytest
++
++from tui_gateway import server
++
++
++@pytest.fixture
++def session(monkeypatch):
++    agent = SimpleNamespace(steer=Mock(return_value=True), steer_strict=Mock(return_value=True), redirect=Mock(), interrupt=Mock())
++    value = {"agent": agent, "running": True, "session_key": "strict-fixture",
++             "history_lock": threading.Lock(), "history": [], "history_version": 0,
++             "transport": None, "attached_images": []}
++    monkeypatch.setitem(server._sessions, "strict-fixture", value)
++    monkeypatch.setattr(server, "_session_compression_in_flight", lambda _: False)
++    return value
++
++
++def steer():
++    return server.handle_request({"id": "strict", "method": "session.steer",
++                                  "params": {"session_id": "strict-fixture", "text": "guidance", "strict": True, "steer_id": "a" * 32}})
++
++
++def test_strict_ack_is_distinct_from_next_turn_queue(session):
++    response = steer()
++    assert response.get("result", {}).get("status") == "steered", response
++    session["agent"].steer_strict.assert_called_once_with("guidance", ANY)
++    session["agent"].redirect.assert_not_called()
++    session["agent"].interrupt.assert_not_called()
++    assert not session.get("queued_prompt")
++
++
++@pytest.mark.parametrize("delivered", [True, False])
++def test_strict_records_and_purges_only_after_injection(session, monkeypatch, delivered):
++    record, purge = Mock(), Mock()
++    monkeypatch.setattr(server, "_record_inflight_correction", record)
++    monkeypatch.setattr(server, "_drop_queued_duplicates_of_inflight_user", purge)
++    monkeypatch.setattr(server, "_emit", Mock())
++    assert steer()["result"]["status"] == "steered"
++    record.assert_not_called()
++    purge.assert_not_called()
++    callback = session["agent"].steer_strict.call_args.args[1]
++    callback(delivered)
++    assert record.call_count == int(delivered)
++    assert purge.call_count == int(delivered)
++
++
++@pytest.mark.parametrize("state", ["compressing", "idle", "building", "rejected", "exception"])
++def test_strict_failure_never_queues_redirects_or_interrupts(session, monkeypatch, state):
++    agent = session["agent"]
++    setup = {
++        "compressing": lambda: monkeypatch.setattr(server, "_session_compression_in_flight", lambda _: True),
++        "idle": lambda: session.update(running=False),
++        "building": lambda: session.update(agent=None),
++        "rejected": lambda: setattr(agent.steer_strict, "return_value", False),
++        "exception": lambda: setattr(agent.steer_strict, "side_effect", RuntimeError("fixture failure")),
++    }
++    setup[state]()
++    response = steer()
++    assert "error" in response or response["result"]["status"] == "rejected", response
++    assert not session.get("queued_prompt")
++    agent.redirect.assert_not_called()
++    agent.interrupt.assert_not_called()
++    if state in ("compressing", "idle", "building"):
++        agent.steer.assert_not_called()

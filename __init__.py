@@ -1,4 +1,4 @@
-"""Neo next-prompt plugin. No tools, injected messages, or automatic actions."""
+"""Neo Composer plugin. No tools, injected messages, or automatic actions."""
 import hashlib
 import json
 import uuid

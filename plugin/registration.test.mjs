@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict'
 import * as nodeModule from 'node:module'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 
 import { load, resolve } from './registration-stubs.mjs'
 
@@ -21,8 +22,14 @@ if (process.env.NEO_REGISTRATION_ASYNC_HOOKS === '1' || typeof nodeModule.regist
 const { host } = await import('@hermes/plugin-sdk')
 const plugin = (await import('./index.mjs')).default
 
-const harness = ({ behaviorVersion = 2, withSettingsPage = true } = {}) => {
-  host.composer = { behaviorVersion }
+test('package metadata uses the same Neo Composer release version', () => {
+  const manifest = readFileSync(new URL('../plugin.yaml', import.meta.url), 'utf8')
+  assert.equal(manifest.match(/^name: (.+)$/m)?.[1], plugin.id)
+  assert.equal(manifest.match(/^version: "([^"]+)"$/m)?.[1], plugin.version)
+})
+
+const harness = ({ behaviorVersion = 2, strictSteeringVersion = 1, withSettingsPage = true } = {}) => {
+  host.composer = { behaviorVersion, strictSteeringVersion }
   const registered = []
   const pages = []
   const notices = []
@@ -45,6 +52,12 @@ const harness = ({ behaviorVersion = 2, withSettingsPage = true } = {}) => {
 }
 
 const areas = registered => registered.map(entry => entry.area)
+
+test('an old host without strict steering support does not register unsafe keys', () => {
+  const { registered, notices } = harness({ strictSteeringVersion: null })
+  assert.ok(!areas(registered).includes('composer.behavior.v2'))
+  assert.equal(notices[0]?.kind, 'error')
+})
 
 test('settings register under Settings ▸ Plugins with no sidebar or route row', () => {
   const { registered, pages } = harness()
@@ -69,6 +82,12 @@ test('the settings page render returns the settings view element', () => {
   const shallow = tree.type({ ctx: { rest: async () => ({ settings: null }) } })
   assert.equal(typeof shallow, 'object')
   assert.equal(shallow.type, 'section')
+  assert.equal(shallow.props['aria-label'], 'Neo Composer settings')
+  const heading = shallow.props.children[0].props.children[0]
+  assert.equal(heading.type, 'h2')
+  assert.equal(heading.props.children, 'Neo Composer')
+  assert.equal(plugin.name, 'Neo Composer')
+  assert.equal(plugin.id, 'neo-next-prompt')
 })
 
 test('an incompatible host gets the status-bar notice and no composer contribution', () => {
