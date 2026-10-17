@@ -1,6 +1,6 @@
 # Neo Composer — install, uninstall and official updates
 
-Neo Composer 0.4.5-rc.1 keeps prediction, preferences and composer policy in the plugin. The separate host patch supplies the native composer seam, strict Steering delivery receipts and session-owned image staging that the v0.22.2 plugin API lacks. This image candidate is not a production activation; a shared-runtime switch needs separate authorization. Internal ID `neo-next-prompt` is retained so existing settings and decisions are not migrated.
+Neo Composer 0.4.5 keeps prediction, preferences and composer policy in the plugin. The separate host patch supplies the native composer seam, strict Steering delivery receipts and session-owned image staging that the v0.22.2 plugin API lacks. Publication does not authorize installation on another target; a shared-runtime switch needs separate authorization. Internal ID `neo-next-prompt` is retained so existing settings and decisions are not migrated.
 
 ## Supported boundary
 
@@ -71,4 +71,4 @@ The plugin package can remain installed while its dependent host capability is u
 
 File-operation acceptance and real runtime activation are separate. The backend installer was exercised against an isolated checkout of the exact official source. The Desktop installer was exercised against a copied Windows installation, including idempotence, foreign-edit refusal, native-file preservation and removal of introduced renderer assets. Synthetic version-change tests verify refusal, not an actual future-version upgrade.
 
-The latest official release checked during this delivery is v0.22.2. An official update availability check is not a cross-version upgrade rehearsal. No claim is made that an old patch will work unchanged on future Hermes releases. Live backend restart, packaged-window registration and real Steering acceptance require the separately coordinated activation receipt.
+The official target checked during this delivery is v0.22.2. An official update availability check is not a cross-version upgrade rehearsal. No claim is made that an old patch will work unchanged on future Hermes releases. A separately coordinated activation of 0.4.5-rc.1 and real packaged-window image-Steering acceptance have completed on the bound target; see [validation](validation-0.4.5.md). The formal 0.4.5 package preserves those host/renderer/installer bytes, with only plugin version metadata and documentation changed. The running installation remains identified as 0.4.5-rc.1; do not edit its applied manifests or receipts, or replay installation merely to change that label.

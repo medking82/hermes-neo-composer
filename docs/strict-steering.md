@@ -21,7 +21,7 @@ A Gemini 4 Argon Medium design consultation favored a phased plugin-first approa
 
 Version 0.4.4 did not stage or steer images. The consultation's initial suggestion to clear attachments on an RPC acknowledgement was **not** adopted: the stricter delivery receipt is required instead.
 
-## 0.4.5-rc.1 candidate: reference + existing vision tool
+## 0.4.5: reference + existing vision tool
 
 `session.steer_image_stage` sends original bytes, never a client path or thumbnail, to a running session that already has `vision_analyze`. It does not modify normal `attached_images`. The server verifies PNG/JPEG/WEBP contents, a 10 MiB decoded-size limit and a 20-million-pixel limit. It returns an opaque session-owned reference, not a server path. Each request accepts one to four distinct references; each session can retain eight pending stages, with a 15-minute expiry checked during stage/claim operations. File digest, size, canonical parent, symlink and hardlink checks are repeated before claim. Failed/abandoned staging can consume pending slots until expiry; the client never silently retries. Delivered originals remain available to the existing vision tool. This is not a general image-retention or secure-erasure service.
 
@@ -30,7 +30,7 @@ A strict request claims the complete batch only after validation. Receipt accept
 The three evidence levels remain separate:
 
 1. **Reference injected:** the safe-boundary delivery receipt; this is the UI success state.
-2. **Image actually read:** the reused isolated Composer E2E calls the existing vision handler on the staged original, compares returned pixel bytes with the source digest, and retains those pixels. The main agent separately used its existing `vision_analyze` tool and correctly read the synthetic text and colored shapes. This verifies pixel delivery and actual visual inspection, not automatic model tool selection or a production client run.
+2. **Image actually read:** the isolated Composer E2E calls the existing vision handler on the staged original and compares returned pixel bytes with the source digest. Separately, in the real packaged Windows Desktop acceptance, native Ctrl+Enter delivered a staged synthetic image to the original working conversation; that agent then called its already-available `vision_analyze` and read the actual text and colored shapes. The matching reference receipt, actual pixel read, transactional draft cleanup, explicit rejection retention and a subsequent zero-image ordinary turn were verified independently. This observed tool call does not guarantee automatic inspection for every future message.
 3. **Native multimodal Steering:** not implemented. The Steering message remains text; image content is obtained only through the existing vision tool. No toolset, main model, provider or effort changes occur.
 
-The candidate requires separate production activation authorization. Passing isolated tests or publishing this source does not authorize installation or a shared backend/frontend restart.
+The live acceptance used installed 0.4.5-rc.1. Formal 0.4.5 retains the exact host/renderer/installer implementation and changes only package version metadata and documentation; the final metadata is validated separately from the earlier behavioral review. See [validation and limits](validation-0.4.5.md). Passing tests or publishing this source does not authorize installation on other targets or a shared backend/frontend restart.

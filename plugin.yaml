@@ -1,5 +1,5 @@
 name: neo-next-prompt
-version: "0.4.5-rc.1"
+version: "0.4.5"
 description: "Persistent, session-bound next-prompt generation for the native Desktop composer. No tools or auto-send."
 author: medking82
 license: MIT

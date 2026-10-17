@@ -2,7 +2,7 @@
 
 A standalone Hermes Desktop plugin for persistent, session-bound ghost-text suggestions and predictable busy-turn keys. The host retains native editing, focus and send ownership; model routing, settings and persistence live here.
 
-**Compatibility:** uninstalled image-Steering candidate **0.4.5-rc.1** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
+**Compatibility:** **0.4.5** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
 
 ## Interaction
 
@@ -52,7 +52,7 @@ python build-plugin.py
 
 The v0.4.3 validation record covers backend unit/integration contracts, native Desktop composer tests, TypeScript, repository checks, Windows build, idempotent install/rollback and foreign-edit refusal. Its browser fixture uses real Composer, prompt actions and steering handler; inference and tool execution are deterministic substitutes. A separate real subscription-backed prediction on synthetic input succeeded without changing main configuration; cache reuse was verified by deterministic service/browser tests.
 
-The v0.4.4 text-only Steering path has its own completed target-window acceptance; that does not cover images. The 0.4.5-rc.1 image candidate remains uninstalled. Its isolated Composer integration test exercises staging, safe-boundary delivery and the existing vision handler reading the original image bytes; the retained pixels were also inspected through the main agent's existing vision tool. This does not prove automatic tool selection, native multimodal Steering or live PC acceptance. Unknown dirty packaged shells still require independently verified, explicitly approved native fingerprints; never regenerate trust from arbitrary dirty bytes. See [the strict-Steering and image contract](docs/strict-steering.md).
+The image-Steering implementation was installed and accepted in the real Windows Desktop window as **0.4.5-rc.1**: native busy Ctrl+Enter delivered the image reference, the original agent actually read its pixels through `vision_analyze`, the matching receipt cleared text and thumbnail together, explicit rejection retained both without queue fallback, and ordinary Enter later arrived as a separate user turn with zero images. **0.4.5 changes only version metadata, generated plugin version/hash and documentation; host behavior, renderer and installers are unchanged.** The installed RC identity and rollback receipts were not relabelled or reinstalled for publication. This is not native multimodal Steering or a guarantee of automatic image inspection. Full regression results remain non-green: 87 Python failures, 250 setup errors and 2 UI failures were matched to the fixed baseline/environment; blocked test bodies remain unexercised. See [validation and remaining limits](docs/validation-0.4.5.md) and [the strict-Steering and image contract](docs/strict-steering.md). Unknown dirty packaged shells still require independently verified, explicitly approved native fingerprints; never regenerate trust from arbitrary dirty bytes.
 
 ## Related work
 
