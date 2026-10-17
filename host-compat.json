@@ -12,15 +12,16 @@
     "agent/auxiliary_client.py": "d86ad24c75ec8d9cd153595f58fede8c321774adaf71b650d380cafd257cfae2",
     "tui_gateway/server.py": "6807f277b14dde36dd3c2558b33b29b89db1dda5640de7e50555b8b199244974",
     "tui_gateway/ws.py": "efdcbbca74f8123324fbccaf387abb5c6914f01bb15fc85ad9179284acc02daf",
-    "tui_gateway/methods_session_interrupt.py": "7c5cbd132f12f7532497607b5e3c6d99bb88b18fd981c0453ccb31202420dfec",
+    "tui_gateway/methods_session_interrupt.py": "516680ce3249d38563efe0d580994a7a476b94e4a4f12aafb0d09443de4365c0",
     "hermes_cli/web_server_dashboard.py": "7f4143db80fcb1ef667ff9faed9076f334b73b55a78dfb781bacc932845be13e",
-    "tui_gateway/contracts/sessions.py": "fcd145919209c4482acce2aa4d5f01a442dc17321d50b0eba1cd722f76d51c42",
+    "tui_gateway/contracts/sessions.py": "1b0dd0f0d3f1ef2d1850ebbd6eb8fedd184a7b2b9d54f4d627804456fd08a0e9",
     "agent/interrupt_control.py": "20d5e8a74073b49647e2fa99ac33799ac626ab0f2d743f81086e592d69e789b3",
     "agent/agent_runtime_helpers.py": "9c7779d3111664a12311a734e2db4b1facaad16996ef70767c2ecd116e642381",
     "agent/turn_context.py": "17991cbbe57c900936d5dbe8ad0c60b10a0384100db13dc78d33ee4796336e32",
     "agent/turn_finalizer.py": "91b60aefe89ecdf0a0223bfec27d313c3df875734a55397228f3061049871f5b",
     "agent/turn_iteration_prep.py": "9b14a3dab3eb031523ab5348053560b79b880c4c9ed600453c621603b71fc716",
-    "tui_gateway/contracts/events.py": "636a0d1dadcebae0d94301a8ec5ce8d79f04ae3eb6e7925794bd55f1cbdde61f",
+    "tui_gateway/contracts/events.py": "98e5cd57af029aa7424a816449a04c08adec512620a3fd3016a0c0050d31cc4a",
+    "tui_gateway/steer_images.py": "43ae65c919852712c8d222cbd65725163a779dd194280f078d3d926fe97615e0",
     "agent/steer_requeue.py": "6f83bd8a5f2e35a3347ca5c7b67e86f11ab2b0a89c335bcbadbce3c060cfd143"
   }
 }

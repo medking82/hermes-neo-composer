@@ -121,6 +121,23 @@ class PromptTests(unittest.TestCase):
             self.assertIsNone(parse_suggestion(json.dumps({'suggestion': text})), text)
         self.assertIsNotNone(parse_suggestion(json.dumps({'suggestion': '继续运行回归测试，告诉我测试结果；不要提交或部署。'})))
 
+    def test_image_references_and_private_paths_never_enter_prediction_history(self):
+        samples = [
+            'Inspect this [Neo Composer image references — image inspection unconfirmed] Image 1: "/private/fixture.png"',
+            'The screenshot is at /private/image-store/fixture.png',
+            r'Look at C:\\Users\\fixture\\private.png',
+            'data:image/png;base64,fixture-image-content',
+            '[{"type":"image_url","image_url":{"url":"https://private.invalid/image.png"}}]',
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                with __import__('contextlib').closing(sqlite3.connect(self.home / 'state.db')) as db, db:
+                    db.execute('UPDATE messages SET content=? WHERE id=1', (sample,))
+                snap = read_snapshot(self.home, 's', 's')
+                self.assertIsNotNone(snap)
+                self.assertNotIn(sample, json.dumps(snap, ensure_ascii=False))
+                self.assertEqual(snap['history'], [{'role': 'assistant', 'content': '解析器已修复，尚未运行测试'}])
+
     def test_read_only_and_non_desktop_suppression(self):
         before = (self.home / 'state.db').read_bytes()
         self.assertIsNotNone(read_snapshot(self.home, 's', 's'))

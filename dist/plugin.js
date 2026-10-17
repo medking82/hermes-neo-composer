@@ -186,7 +186,7 @@ const Settings = createSettingsView({ jsx, useEffect, useRef, useState, Button, 
 export default {
   id: 'neo-next-prompt',
   name: 'Neo Composer',
-  version: '0.4.4',
+  version: '0.4.5-rc.1',
   defaultEnabled: true,
   register(ctx) {
     if (typeof ctx.registerSettingsPage === 'function') {

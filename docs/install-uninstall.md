@@ -1,6 +1,6 @@
 # Neo Composer — install, uninstall and official updates
 
-Neo Composer 0.4.4 keeps prediction, preferences and composer policy in the plugin. The separate host patch supplies only the native composer seam and strict text-Steering delivery receipts that the v0.22.2 plugin API lacks. Internal ID `neo-next-prompt` is retained so existing settings and decisions are not migrated.
+Neo Composer 0.4.5-rc.1 keeps prediction, preferences and composer policy in the plugin. The separate host patch supplies the native composer seam, strict Steering delivery receipts and session-owned image staging that the v0.22.2 plugin API lacks. This image candidate is not a production activation; a shared-runtime switch needs separate authorization. Internal ID `neo-next-prompt` is retained so existing settings and decisions are not migrated.
 
 ## Supported boundary
 
@@ -21,7 +21,7 @@ node install.mjs apply-backend ROOT BUNDLE
 node install.mjs check-backend-update ROOT BUNDLE
 ```
 
-The installer checks the supported commit, frozen preimages, all nine source payloads and the coupled interface fingerprints. It backs up only its declared files and verifies the installed bytes. Unrelated files are not overwritten. Existing settings, sessions and prediction decisions are outside its write set.
+The installer checks the supported commit, frozen preimages, all ten source payloads and the coupled interface fingerprints. It backs up only its declared files and verifies the installed bytes. Unrelated files are not overwritten. Existing settings, sessions and prediction decisions are outside its write set.
 
 Uninstall the backend host patch with:
 

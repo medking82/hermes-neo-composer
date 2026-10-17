@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const FILES = ['agent/agent_runtime_helpers.py', 'agent/interrupt_control.py', 'agent/turn_context.py', 'agent/turn_finalizer.py', 'agent/turn_iteration_prep.py', 'agent/steer_requeue.py', 'tui_gateway/contracts/events.py', 'tui_gateway/contracts/sessions.py', 'tui_gateway/methods_session_interrupt.py']
+const FILES = ['agent/agent_runtime_helpers.py', 'agent/interrupt_control.py', 'agent/turn_context.py', 'agent/turn_finalizer.py', 'agent/turn_iteration_prep.py', 'agent/steer_requeue.py', 'tui_gateway/contracts/events.py', 'tui_gateway/contracts/sessions.py', 'tui_gateway/methods_session_interrupt.py', 'tui_gateway/steer_images.py']
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 export function ordinary(root, relative) {
   assert(typeof relative === 'string' && relative.split('/').every(p => /^[a-zA-Z0-9_.-]+$/.test(p) && p !== '.' && p !== '..'), 'Unsafe backend path')

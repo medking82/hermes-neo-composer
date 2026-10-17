@@ -14,6 +14,14 @@ VALID_ID = re.compile(r'[A-Za-z0-9_:.-]{1,160}\Z')
 # A cached valid-null may be re-asked once this many seconds after it landed.
 EMPTY_RETRY_AFTER = 600
 
+# Prediction is a separate request: omit whole image/path-bearing rows, before
+# excerpting, so captions, data URLs and private local paths cannot escape in a
+# head/tail window. This deliberately favors privacy over prediction context.
+PRIVATE_PREDICTION_CONTENT = re.compile(
+    r'(?i)(?:Neo Composer image references|data:image/|["\x27](?:image_url|input_image)["\x27]|file://|'
+    r'(?<![\w:])(?:[A-Za-z]:[\\/]|~[\\/]|/[\w.~]|\\\\))'
+)
+
 
 def parse_suggestion(raw):
     try:
@@ -76,7 +84,7 @@ def read_snapshot(home, session_id, stored_id, route_revision=''):
         history = []
         for row in rows:
             text = row['content'] or ''
-            if not isinstance(text, str):
+            if not isinstance(text, str) or PRIVATE_PREDICTION_CONTENT.search(text):
                 continue
             if len(text) > 1800:
                 text = text[:600] + '\n[long message excerpt]\n' + text[-1200:]

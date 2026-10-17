@@ -2,7 +2,7 @@
 
 A standalone Hermes Desktop plugin for persistent, session-bound ghost-text suggestions and predictable busy-turn keys. The host retains native editing, focus and send ownership; model routing, settings and persistence live here.
 
-**Compatibility:** uninstalled candidate **0.4.4** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
+**Compatibility:** uninstalled image-Steering candidate **0.4.5-rc.1** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
 
 ## Interaction
 
@@ -10,9 +10,9 @@ A standalone Hermes Desktop plugin for persistent, session-bound ghost-text sugg
 - **Tab** accepts it as an editable, undoable draft. It does not send.
 - **Esc** persistently dismisses that candidate/context.
 - **Enter** sends when idle and queues while busy.
-- **Ctrl+Enter** while busy requests strict, text-only `session.steer`. It never falls back to redirect, interrupt or next-turn submission. Unsupported hosts, attachments, compression and ended turns retain the draft with an explicit notice.
+- **Ctrl+Enter** while busy requests strict `session.steer`. It accepts text plus up to four local PNG/JPEG/WEBP images through a separate staging-only route. Other attachments, unsupported hosts, unavailable vision tools, compression and ended turns retain the draft with an explicit notice; there is no redirect, interrupt or next-turn fallback.
 - “Waiting for safe-boundary delivery”, “Steering injected” and the next-turn queue are distinct states. The composer clears only the unchanged submitted draft after its matching delivery receipt—not after the RPC's buffer acknowledgement. A delivery receipt confirms insertion into the conversation, not that the model has read or acted on it. Disconnects and unconfirmed delivery retain the draft and do not automatically retry.
-- Images are not implemented for Steering in this release; their thumbnails and text remain intact. Prediction remains text-only and receives no attachment content.
+- Images use **reference + the session's existing vision tool**, not native multimodal Steering. The success notice means reference injection only; it does not claim the model has inspected the image. Text and thumbnails clear together only for the matching request and ordered image-reference batch. Prediction excludes image references, payloads and private-path lines.
 - **Shift+Enter** inserts a newline.
 - A cached empty prediction re-asks itself once after ten minutes on the next idle trigger; user decisions (Tab-accept, Esc) are never re-asked. Typing, attachments, IME and native completion UI retain priority. Refresh/reconnect does not intentionally repeat inference for the same persisted context.
 
@@ -52,7 +52,7 @@ python build-plugin.py
 
 The v0.4.3 validation record covers backend unit/integration contracts, native Desktop composer tests, TypeScript, repository checks, Windows build, idempotent install/rollback and foreign-edit refusal. Its browser fixture uses real Composer, prompt actions and steering handler; inference and tool execution are deterministic substitutes. A separate real subscription-backed prediction on synthetic input succeeded without changing main configuration; cache reuse was verified by deterministic service/browser tests.
 
-The v0.4.4 strict-Steering candidate has separate tests, safe-boundary receipts and a sealed Windows renderer build. It is not yet installed or live-window accepted. Its fixed-release installer has been exercised on an isolated official backend checkout and a copied Windows target; Desktop uninstall also removes this release's introduced renderer assets. Unknown dirty packaged shells are still refused unless their exact native fingerprints were independently verified and explicitly frozen. Do not override that check or treat v0.4.3 installation evidence as v0.4.4 live acceptance. Image Steering remains a reviewed design, not implemented functionality. See [the strict-Steering contract and image proposal](docs/strict-steering.md).
+The v0.4.4 text-only Steering path has its own completed target-window acceptance; that does not cover images. The 0.4.5-rc.1 image candidate remains uninstalled. Its isolated Composer integration test exercises staging, safe-boundary delivery and the existing vision handler reading the original image bytes; the retained pixels were also inspected through the main agent's existing vision tool. This does not prove automatic tool selection, native multimodal Steering or live PC acceptance. Unknown dirty packaged shells still require independently verified, explicitly approved native fingerprints; never regenerate trust from arbitrary dirty bytes. See [the strict-Steering and image contract](docs/strict-steering.md).
 
 ## Related work
 

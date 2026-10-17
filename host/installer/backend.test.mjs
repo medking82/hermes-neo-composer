@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 
 const installer = fileURLToPath(new URL('./install.mjs', import.meta.url))
-const names = ['agent/agent_runtime_helpers.py', 'agent/interrupt_control.py', 'agent/turn_context.py', 'agent/turn_finalizer.py', 'agent/turn_iteration_prep.py', 'agent/steer_requeue.py', 'tui_gateway/contracts/events.py', 'tui_gateway/contracts/sessions.py', 'tui_gateway/methods_session_interrupt.py']
+const names = ['agent/agent_runtime_helpers.py', 'agent/interrupt_control.py', 'agent/turn_context.py', 'agent/turn_finalizer.py', 'agent/turn_iteration_prep.py', 'agent/steer_requeue.py', 'tui_gateway/contracts/events.py', 'tui_gateway/contracts/sessions.py', 'tui_gateway/methods_session_interrupt.py', 'tui_gateway/steer_images.py']
 const hash = value => createHash('sha256').update(value).digest('hex')
 function fixture(t) {
   const area = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-backend-test-'))
@@ -18,7 +18,7 @@ function fixture(t) {
   const git = args => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   git(['init', '-q']); git(['config', 'user.email', 'fixture@example.invalid']); git(['config', 'user.name', 'Fixture'])
   const entries = names.map((name, i) => {
-    const before = name.endsWith('/steer_requeue.py') ? null : `# original ${i}\n`
+    const before = (name.endsWith('/steer_requeue.py') || name.endsWith('/steer_images.py')) ? null : `# original ${i}\n`
     const after = `# candidate ${i}\n`
     const target = path.join(root, name), payload = path.join(bundle, 'source', name)
     fs.mkdirSync(path.dirname(target), { recursive: true }); fs.mkdirSync(path.dirname(payload), { recursive: true })
