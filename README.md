@@ -4,6 +4,8 @@ A standalone Hermes Desktop plugin for persistent, session-bound ghost-text sugg
 
 **Compatibility:** **0.4.5** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
 
+For the newer Desktop commit `9e01b44dd23978f9ff40b7837467f3a9f1582130`, see the [Desktop-only compatibility candidate](docs/compatibility-desktop-9e01b44.md). It retains the existing pinned backend and does not change plugin settings or authorize a live switch; the older host patch is not interchangeable with it.
+
 ## Interaction
 
 - After a completed turn, an empty, focused composer may show a suggestion. This is not as-you-type autocomplete.
