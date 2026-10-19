@@ -7,8 +7,19 @@ the primary session model/effort is never changed.
 from pathlib import Path
 import hashlib
 import json
+import re
 
 PREDICTION_EFFORT = 'low'
+
+# Prediction transport/catalog and owner-resolution seams only. Native composer
+# and Steering fingerprints remain in the separate legacy `pins` inventory.
+PREDICTION_PIN_PATHS = (
+    'agent/anthropic_credentials.py', 'hermes_constants.py', 'hermes_cli/auth.py',
+    'hermes_cli/codex_models.py', 'hermes_cli/models.py',
+    'hermes_cli/model_switch_providers.py', 'agent/models_dev.py',
+    'agent/auxiliary_client.py', 'tui_gateway/server.py', 'tui_gateway/ws.py',
+    'hermes_cli/web_server_dashboard.py', 'agent/agent_runtime_helpers.py',
+)
 
 
 def prediction_plan():
@@ -21,16 +32,22 @@ def prediction_plan():
 
 
 def validate_host():
+    """Unknown prediction dependencies fail closed without gating optional native code."""
     from agent import auxiliary_client as aux
     root = Path(aux.__file__).resolve().parents[1]
     expected = json.loads(Path(__file__).with_name('host-compat.json').read_text())
-    pins = expected.get('pins')
-    if not isinstance(pins, dict) or not pins:
-        raise RuntimeError('host compatibility pins missing')
-    for name, sha in pins.items():
+    pins = expected.get('prediction_pins')
+    error = 'host prediction adapter changed; revalidation required'
+    if not isinstance(pins, dict) or set(pins) != set(PREDICTION_PIN_PATHS):
+        raise RuntimeError(error)
+    for name in PREDICTION_PIN_PATHS:
+        approved = pins[name]
+        if (not isinstance(approved, list) or not approved
+                or any(not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha) for sha in approved)):
+            raise RuntimeError(error)
         file = root / name
-        if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != sha:
-            raise RuntimeError('host interface changed; revalidation required')
+        if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() not in approved:
+            raise RuntimeError(error)
 
 
 def complete(snapshot, metrics=None, *, expected_plan=None, owner_home=None):

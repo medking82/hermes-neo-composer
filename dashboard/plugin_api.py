@@ -18,6 +18,11 @@ class Generate(BaseModel):
     stored_id: str = Field(min_length=1, max_length=160)
 
 
+class ValidateOffer(Generate):
+    version: str = Field(pattern=r'^[0-9a-f]{64}$')
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+
+
 class Decision(BaseModel):
     root: str = Field(min_length=1, max_length=160)
     version: str = Field(pattern=r'^[0-9a-f]{64}$')
@@ -108,6 +113,23 @@ def resolve_runtime_session(runtime_id, home):
         if owner != home.resolve():
             return None
         return record.get('session_key')
+
+
+@router.post('/validate')
+def validate_offer(body: ValidateOffer):
+    active = service()
+    if not getattr(active, 'prediction_plan', {'route': None})['route']:
+        return {'current': False}
+    key = resolve_runtime_session(body.session_id, active.home)
+    snapshot = active.snapshot(key, body.stored_id) if key else None
+    current = bool(snapshot and snapshot['version'] == body.version
+                   and active.store.is_ready(body.stored_id, body.version, body.request_id))
+    if current:
+        fresh = active.snapshot(key, body.stored_id)
+        current = bool(fresh and fresh['version'] == body.version
+                       and resolve_runtime_session(body.session_id, active.home) == key
+                       and service().route_revision == active.route_revision)
+    return {'current': current}
 
 
 @router.post('/decision')

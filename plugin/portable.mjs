@@ -20,6 +20,8 @@ export async function insertPortableOffer(host,context,controller) {
   if(!offer) return {ok:false,reason:'Suggestion Is No Longer Available'}
   const draft=await host.composer.getDraft(context.storedId)
   if(draft!=='' || !samePortableContext(host,context) || !offer.current()) return {ok:false,reason:'Draft Or Context Changed'}
+  if(typeof offer.validate!=='function' || await offer.validate()!==true) return {ok:false,reason:'Suggestion Is No Longer Current'}
+  if(await host.composer.getDraft(context.storedId)!=='' || !samePortableContext(host,context) || !offer.current()) return {ok:false,reason:'Draft Or Context Changed'}
   const applied=await host.composer.insertText(context.storedId,offer.text,{mode:'inline'})
   if(applied!==true) return {ok:false,reason:'Draft Was Not Inserted'}
   return {ok:true,durable:offer.commit()}

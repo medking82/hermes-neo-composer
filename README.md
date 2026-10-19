@@ -8,7 +8,17 @@ The current native adaptation targets Desktop `3752497cc4d214023f4736559a5f0e586
 
 ## SDK Compatibility Mode
 
-Open **Neo Composer · Suggestions** in the status bar while the focused chat is idle and its draft is empty. Preview, insert as a draft, dismiss or refresh explicitly. Closing the popover stops its controller. Connection/profile/session changes and a changed draft refuse stale insertion; a consumed decision is recorded only after the SDK acknowledges the write. Native shortcuts are untouched. The status-bar surface is deliberate: ordinary composer slots do not expose an owner-qualified per-surface context.
+### Independent Compatibility Boundaries
+
+- Profile-owned settings remain available when a prediction or native adapter is incompatible; connection/profile ownership and stale-scope checks still apply. An unavailable private-interface catalog is omitted rather than read without validation.
+- Prediction checks its own closed, 12-file private-interface inventory in `prediction_pins`. Unknown prediction bytes still fail closed. The original 21-file `pins` inventory is retained unchanged for the version-bound native context; native/Steering-only drift is not a prerequisite for SDK predictions.
+- The additional official helper variant is not an automatic hash refresh: it matches the exact `d923a5e` Git blob, differs from the previously pinned helper only in two Steering definitions, and leaves prediction/cache/socket helpers and module-level globals unchanged. Routing, credential, endpoint and retry checks are unchanged.
+- PC Desktop `b406d1860b9a3865926cad3a4348f4f854466ae7` exposes the owner-aware draft SDK, but the observed GA401 serve still imports the separate `d923a5e` checkout. Neither identity proves the other. This recovery does not port native gray text, key overrides or reliable Steering to the new Desktop.
+- Verification is isolated SDK/backend contract testing, not a claim that a live plugin was installed or reloaded. An incompatible prediction adapter can pause predictions without removing the settings needed to disable or repair it.
+
+Open **Neo Composer · Suggestions** in the status bar while the focused chat is idle and its draft is empty. Preview, insert as a draft, dismiss or refresh explicitly. Closing the popover stops its controller. Connection/profile/session changes and a changed draft refuse stale insertion; a consumed decision is recorded only after the SDK acknowledges the write. Before insertion, a non-generating `/validate` read checks the current owned session version, prediction route and ready request identity; a stale result clears the local offer without recording a dismissal or scheduling new inference. The stored session model configuration contributes only an opaque version input, including endpoint/policy-reference changes with unchanged model names; its contents are neither returned nor sent as prediction history. This is a freshness check at the validation boundary, not an atomic lock against every later user action. Native shortcuts are untouched. The status-bar surface is deliberate: ordinary composer slots do not expose an owner-qualified per-surface context.
+
+The SDK frontend and backend must come from the same recovery commit: a missing `/validate` endpoint makes the SDK frontend refuse insertion rather than silently skip the check. PC's observed pending update `2e83e2a935ee04f606aab58e498d34ca58d84c07` leaves the composer SDK and the twelve prediction seam files unchanged relative to `b406d18`. Its owning-profile model-selection change was inspected separately; this does not certify that newer backend on GA401 or claim a live upgrade was applied.
 
 ## Native Interaction — Enhancement Required
 

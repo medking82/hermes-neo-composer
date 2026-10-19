@@ -116,6 +116,14 @@ export function createController(env,storage) {
       return Object.freeze({
         text,
         current:()=>row===candidate && visible()===text,
+        validate:async()=> {
+          const result=await env.request('/validate',{
+            session_id:c.sessionId,stored_id:c.storedId,version:candidate.version,request_id:candidate.request_id
+          })
+          if(result?.current===true) return true
+          if(row===candidate) {expired=true;row=null;cancelRetry();publish()}
+          return false
+        },
         commit(){
           if(committed) return true
           try {

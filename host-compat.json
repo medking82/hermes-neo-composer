@@ -23,5 +23,44 @@
     "tui_gateway/contracts/events.py": "98e5cd57af029aa7424a816449a04c08adec512620a3fd3016a0c0050d31cc4a",
     "tui_gateway/steer_images.py": "43ae65c919852712c8d222cbd65725163a779dd194280f078d3d926fe97615e0",
     "agent/steer_requeue.py": "6f83bd8a5f2e35a3347ca5c7b67e86f11ab2b0a89c335bcbadbce3c060cfd143"
+  },
+  "prediction_pins": {
+    "agent/anthropic_credentials.py": [
+      "caedbc2e4f832c7147db540d8a1395b96dca7e201cbfec2cb30f8d335de0ee1e"
+    ],
+    "hermes_constants.py": [
+      "8d55a41452b625061f1f2e2f507a7e7ffb2a396e711afcc7aee28b03a6e8fa9d"
+    ],
+    "hermes_cli/auth.py": [
+      "d66c7c7f53266d679970119d5db09be7145e115818991d667f7b5c1b13375705"
+    ],
+    "hermes_cli/codex_models.py": [
+      "701e5aa665fac59c17e31aa33bef9bf225fef128ddf5b6cbf8419282f861b217"
+    ],
+    "hermes_cli/models.py": [
+      "d6324ede1d2129a403af50dbcf0055d19e4f8e5a6d867e14e3fca4f38db79472"
+    ],
+    "hermes_cli/model_switch_providers.py": [
+      "462ecb18bd015dc6dd5e48990e2248d07d2200c61610f887f81afc450208ea0d"
+    ],
+    "agent/models_dev.py": [
+      "92bab26726beae0259989c75316167134b0f67a243a5faa4a29c5f6e4ac9f30d"
+    ],
+    "agent/auxiliary_client.py": [
+      "d86ad24c75ec8d9cd153595f58fede8c321774adaf71b650d380cafd257cfae2"
+    ],
+    "tui_gateway/server.py": [
+      "6807f277b14dde36dd3c2558b33b29b89db1dda5640de7e50555b8b199244974"
+    ],
+    "tui_gateway/ws.py": [
+      "efdcbbca74f8123324fbccaf387abb5c6914f01bb15fc85ad9179284acc02daf"
+    ],
+    "hermes_cli/web_server_dashboard.py": [
+      "7f4143db80fcb1ef667ff9faed9076f334b73b55a78dfb781bacc932845be13e"
+    ],
+    "agent/agent_runtime_helpers.py": [
+      "9c7779d3111664a12311a734e2db4b1facaad16996ef70767c2ecd116e642381",
+      "295bd0adcb698ddeb87966f77a79ef1c8016702641db401bfe692ffb63e0dd49"
+    ]
   }
 }

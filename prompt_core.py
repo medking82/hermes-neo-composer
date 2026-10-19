@@ -80,6 +80,11 @@ def read_snapshot(home, session_id, stored_id, route_revision=''):
         reasoning = cfg.get('reasoning_config')
         identity = [CONTRACT, lineage, last['id'], session['model'], reasoning, session['billing_provider'], session['rewind_count'], route_revision,
                     [[row['id'], row['role'], row['content']] for row in rows]]
+        # Endpoint/policy-reference changes can keep the same model/provider names.
+        # Bind their stored context opaquely; never return it or send it as history.
+        model_context = {key: value for key, value in cfg.items() if key != 'reasoning_config'}
+        if model_context:
+            identity.append(['session_model_config', model_context])
         version = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         history = []
         for row in rows:
@@ -143,6 +148,11 @@ class PromptStore:
             result = db.execute("UPDATE prompts_v2 SET status=?,text=? WHERE root=? AND version=? AND request_id=? AND status='pending'",
                                 (status, text, row['root'], row['version'], row['request_id']))
             return result.rowcount == 1
+
+    def is_ready(self, root, version, request_id):
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM prompts_v2 WHERE root=? AND version=? AND request_id=? AND status='ready'",
+                              (root, version, request_id)).fetchone() is not None
 
     def decide(self, root, version, request_id, status):
         if status not in {'consumed', 'dismissed'}:

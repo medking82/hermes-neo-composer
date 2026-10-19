@@ -18,19 +18,28 @@ def register(ctx):
 
 
 def validate_scope():
+    # Keep profile-owned settings reachable even if an optional adapter is unavailable.
     from hermes_constants import get_hermes_home
-    from .llm_once import validate_host
-    validate_host()
     if _owner_home is None or Path(get_hermes_home()).resolve() != _owner_home:
         raise PermissionError('next-prompt owner scope mismatch')
+
+
+def _settings_catalog():
+    # Optional private-interface metadata must fail closed, not hide local settings.
+    try:
+        from .llm_once import validate_host
+        validate_host()
+        from .inventory import load_catalog
+        return load_catalog()
+    except Exception:
+        return []
 
 
 def settings_view():
     validate_scope()
     from .settings import load_settings
-    from .inventory import load_catalog
     from .routing import select_route
-    settings, catalog = load_settings(_owner_home), load_catalog()
+    settings, catalog = load_settings(_owner_home), _settings_catalog()
     catalog = [{k: v for k, v in row.items() if k != 'account_scope'} for row in catalog]
     return {'scope': _scope, 'settings': settings, 'catalog': catalog, 'selection': select_route(settings, catalog),
             'note': 'Catalog availability is not a live inference guarantee. Refresh models in Hermes settings if the catalog is stale.'}
@@ -41,12 +50,11 @@ def update_settings(value, scope):
     if scope != _scope:
         raise ValueError('Profile or connection changed; reload settings before saving.')
     from .settings import save_settings, validate_settings
-    from .inventory import load_catalog
     value = validate_settings(value)
     from .settings import load_settings
     previous = load_settings(_owner_home)
     added = set(value['providers']) - set(previous['providers'])
-    if value['enabled'] and added and not added.issubset({row['provider'] for row in load_catalog()}):
+    if value['enabled'] and added and not added.issubset({row['provider'] for row in _settings_catalog()}):
         raise ValueError('Provider catalog unavailable. Refresh models in Hermes settings first.')
     return save_settings(_owner_home, value)
 

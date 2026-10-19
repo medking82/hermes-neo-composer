@@ -119,6 +119,14 @@ function createController(env,storage) {
       return Object.freeze({
         text,
         current:()=>row===candidate && visible()===text,
+        validate:async()=> {
+          const result=await env.request('/validate',{
+            session_id:c.sessionId,stored_id:c.storedId,version:candidate.version,request_id:candidate.request_id
+          })
+          if(result?.current===true) return true
+          if(row===candidate) {expired=true;row=null;cancelRetry();publish()}
+          return false
+        },
         commit(){
           if(committed) return true
           try {
@@ -169,6 +177,8 @@ async function insertPortableOffer(host,context,controller) {
   if(!offer) return {ok:false,reason:'Suggestion Is No Longer Available'}
   const draft=await host.composer.getDraft(context.storedId)
   if(draft!=='' || !samePortableContext(host,context) || !offer.current()) return {ok:false,reason:'Draft Or Context Changed'}
+  if(typeof offer.validate!=='function' || await offer.validate()!==true) return {ok:false,reason:'Suggestion Is No Longer Current'}
+  if(await host.composer.getDraft(context.storedId)!=='' || !samePortableContext(host,context) || !offer.current()) return {ok:false,reason:'Draft Or Context Changed'}
   const applied=await host.composer.insertText(context.storedId,offer.text,{mode:'inline'})
   if(applied!==true) return {ok:false,reason:'Draft Was Not Inserted'}
   return {ok:true,durable:offer.commit()}
