@@ -1,4 +1,4 @@
-import { host, ROUTES_AREA, SIDEBAR_NAV_AREA, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@hermes/plugin-sdk'
+import { host, useValue, Popover, PopoverTrigger, PopoverContent, ROUTES_AREA, SIDEBAR_NAV_AREA, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 // Portable plugin policy: no app-private imports, DOM handlers, tools or auto-send.
@@ -110,6 +110,32 @@ function createController(env,storage) {
   return {
     update(next){state=next;publish();start()},
     refresh(){publish();start()},
+    capture(){
+      const text=visible(), candidate=row
+      if(!text) return null
+      let prior
+      try {prior=JSON.stringify(ledger(storage)[key])} catch {return null}
+      let committed=false
+      return Object.freeze({
+        text,
+        current:()=>row===candidate && visible()===text,
+        commit(){
+          if(committed) return true
+          try {
+            // An insert can finish after the component unmounts. Bind its
+            // decision to the captured owner, but never erase a later choice.
+            if(JSON.stringify(ledger(storage)[key])!==prior) return false
+            const d=decision(candidate,'consumed')
+            remember(storage,key,d)
+            committed=true
+            if(row===candidate) row=null
+            if(!disposed) publish()
+            acknowledge(d)
+            return true
+          } catch {return false}
+        }
+      })
+    },
     decide(status){
       const text=visible()
       if(!text||!['consumed','dismissed'].includes(status)) return null
@@ -121,8 +147,178 @@ function createController(env,storage) {
     dispose(){disposed=true;off();for(const timer of timers)clearTimeout(timer);timers.clear();row=null;env.publish(null)}
   }
 }
+// SDK-only mode: explicit preview and acknowledged insertion, never send.
+const portableAtoms = ['focusedSessionId','focusedStoredSessionId','focusedSessionOwner','connectionId','profile','busy']
+const portableSupported = host => typeof host.activeConnectionId==='function' && typeof host.composer?.getDraft==='function' && typeof host.composer?.insertText==='function' && portableAtoms.every(key=>typeof host.state?.[key]?.get==='function')
+function readPortableContext(host) {
+  if(!portableSupported(host)) return null
+  const read=key=>host.state[key].get()
+  const connectionId=host.activeConnectionId(), sessionId=read('focusedSessionId'), storedId=read('focusedStoredSessionId'), busy=read('busy')
+  const rawProfile=read('profile'), owner=read('focusedSessionOwner')
+  const profile=typeof rawProfile==='string'?(rawProfile||'default'):null
+  if(!owner || Array.isArray(owner) || typeof owner!=='object' || !profile || typeof owner.profile!=='string') return null
+  if(![connectionId,sessionId,storedId].every(value=>typeof value==='string' && value.length>0) || typeof busy!=='boolean') return null
+  if(connectionId!==owner.connectionId || profile!==(owner.profile||'default')) return null
+  return Object.freeze({connectionId,profile,sessionId,storedId,busy})
+}
+const samePortableContext = (host,context) => !!context && JSON.stringify(readPortableContext(host))===JSON.stringify(context)
+const portableOwnerMatches = (host,context) => host.activeConnectionId()===context.connectionId && (host.state.profile.get()||'default')===context.profile
+async function insertPortableOffer(host,context,controller) {
+  if(!context || context.busy || !samePortableContext(host,context)) return {ok:false,reason:'Context Changed'}
+  const offer=controller?.capture()
+  if(!offer) return {ok:false,reason:'Suggestion Is No Longer Available'}
+  const draft=await host.composer.getDraft(context.storedId)
+  if(draft!=='' || !samePortableContext(host,context) || !offer.current()) return {ok:false,reason:'Draft Or Context Changed'}
+  const applied=await host.composer.insertText(context.storedId,offer.text,{mode:'inline'})
+  if(applied!==true) return {ok:false,reason:'Draft Was Not Inserted'}
+  return {ok:true,durable:offer.commit()}
+}
+function createPortableSession({host,ctx,context,createController,onChange}) {
+  let disposed=false,started=false,controller=null,inserting=false
+  const current=()=>!disposed && !!context && !context.busy && samePortableContext(host,context)
+  const publish=update=>{if(current()) onChange(update)}
+  const request=async(path,body)=>{
+    if(path==='/decision') {
+      if(!portableOwnerMatches(host,context)) throw Error('Owner Changed')
+    } else {
+      if(!current() || await host.composer.getDraft(context.storedId)!=='' || !current()) throw Error('Draft Or Context Changed')
+    }
+    const result=await ctx.rest(path,{method:'POST',body})
+    if(path!=='/decision' && !current()) throw Error('Context Changed')
+    return result
+  }
+  return {
+    async start(){
+      if(started || !current()) return
+      started=true;publish({phase:'checking',text:null})
+      try {
+        const view=await ctx.rest('/settings')
+        if(!current()) return
+        if(view?.settings?.enabled!==true || !view?.selection?.route) {publish({phase:'paused',text:null});return}
+        if(await host.composer.getDraft(context.storedId)!=='' || !current()) {publish({phase:'draft',text:null});return}
+        controller=createController({context,request,publish:text=>publish({phase:text?'ready':'idle',text}),onSettled:listener=>typeof ctx.onEvent==='function'?ctx.onEvent('session.info',event=>{
+          if(current() && event.session_id===context.sessionId && event.payload?.running===false) listener()
+        }):()=>{}},ctx.storage)
+        controller.update({enabled:true,empty:true})
+      } catch {publish({phase:'unavailable',text:null})}
+    },
+    async insert(){
+      if(inserting) return {ok:false,reason:'Insertion Already Pending'}
+      inserting=true
+      try {return await insertPortableOffer(host,context,controller)}
+      catch {return {ok:false,reason:'Insertion Could Not Be Confirmed'}}
+      finally {inserting=false}
+    },
+    dismiss(){return current() && !!controller?.decide('dismissed')},
+    dispose(){disposed=true;controller?.dispose()}
+  }
+}
+function createPortableWidget({host,jsx,useValue,useEffect,useRef,useState,Button,Popover,PopoverTrigger,PopoverContent,createController}) {
+  return function PortableSuggestions({ctx}) {
+    useValue(host.state.focusedSessionId)
+    useValue(host.state.focusedStoredSessionId)
+    useValue(host.state.focusedSessionOwner)
+    useValue(host.state.connectionId)
+    useValue(host.state.profile)
+    useValue(host.state.busy)
+    const [open,setOpen]=useState(false), [revision,setRevision]=useState(0), [view,setView]=useState({phase:'idle',text:null}), [notice,setNotice]=useState(''), [pending,setPending]=useState(false)
+    const ref=useRef(null), context=readPortableContext(host), key=JSON.stringify(context)
+    useEffect(()=>{
+      setView({phase:'idle',text:null});setNotice('');setPending(false)
+      if(!open || !context || context.busy) return
+      const session=createPortableSession({host,ctx,context,createController,onChange:setView})
+      ref.current=session;void session.start()
+      return ()=>{if(ref.current===session)ref.current=null;session.dispose()}
+    },[ctx,open,key,revision])
+    const insert=async()=>{
+      const session=ref.current;if(!session || pending)return
+      setPending(true);setNotice('')
+      const result=await session.insert()
+      if(ref.current!==session)return
+      setPending(false);setNotice(result.ok?(result.durable?'Inserted As Draft':'Inserted As Draft; Decision Was Not Saved'):result.reason)
+    }
+    const hints={checking:'Checking Prediction Settings…',paused:'Prediction Is Paused. Check Neo Composer Settings.',draft:'Keep The Draft Empty To Request A Suggestion.',idle:'No Suggestion For This Context Yet.',unavailable:'Prediction Backend Is Unavailable.'}
+    return jsx(Popover,{open,onOpenChange:setOpen,children:[
+      jsx(PopoverTrigger,{asChild:true,children:jsx(Button,{variant:'ghost',size:'sm','aria-label':'Neo Composer Suggestions',children:'Neo Composer · Suggestions'})}),
+      jsx(PopoverContent,{align:'end',style:{width:340,maxWidth:'calc(100vw - 24px)',display:'grid',gap:12},children:[
+        jsx('strong',{children:'Neo Composer Suggestions'}),
+        jsx('p',{style:{color:'var(--ui-text-secondary)'},children:'SDK Compatibility Mode · Native Shortcuts Are Unchanged'}),
+        jsx('p',{role:'status',style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},children:!context?'Select A Chat Owned By The Active Gateway.':context.busy?'Suggestions Pause While The Chat Is Working.':view.text||hints[view.phase]||hints.idle}),
+        jsx('div',{style:{display:'flex',flexWrap:'wrap',gap:8},children:[
+          jsx(Button,{disabled:!view.text||pending||!context||context.busy,onClick:insert,children:pending?'Inserting…':'Insert As Draft'}),
+          jsx(Button,{variant:'outline',disabled:!view.text||pending,onClick:()=>{if(ref.current?.dismiss())setNotice('Dismissed For This Context')},children:'Dismiss'}),
+          jsx(Button,{variant:'ghost',disabled:pending,onClick:()=>setRevision(value=>value+1),children:'Refresh'})
+        ]}),
+        jsx('p',{role:'status',style:{color:'var(--ui-text-secondary)'},children:notice})
+      ]})
+    ]})
+  }
+}
+// Local launch is an explicit user gesture. No backend shell or process API.
+const installerKey='enhancement.installerPath'
+function validInstallerPath(value) {
+  if(typeof value!=='string' || value.length>1024 || !/^[A-Za-z]:[\\/]/.test(value) || /[\x00-\x1f<>"|?*:%!]/.test(value.slice(2))) return false
+  const parts=value.slice(3).split(/[\\/]/)
+  if(parts.some(part=>!part || part==='.' || part==='..' || /[. ]$/.test(part) || /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part))) return false
+  return /^NeoComposerSetup\.cmd$/i.test(parts.at(-1))
+}
+async function chooseEnhancementInstaller(ctx) {
+  if(typeof ctx.os?.pickOpenPath!=='function') return {ok:false,reason:'Local File Picker Is Unavailable'}
+  try {
+    const path=await ctx.os.pickOpenPath({title:'Select The Trusted Neo Composer Installer',filters:[{name:'Neo Composer Installer',extensions:['cmd']}]})
+    if(path===null) return {ok:false,reason:'Selection Cancelled'}
+    if(!validInstallerPath(path)) return {ok:false,reason:'Choose A Local NeoComposerSetup.cmd File'}
+    ctx.storage.set(installerKey,path)
+    if(ctx.storage.get(installerKey,null)!==path) return {ok:false,reason:'Installer Selection Was Not Saved'}
+    return {ok:true,path}
+  } catch {return {ok:false,reason:'Installer Selection Could Not Be Saved'}}
+}
+async function launchEnhancementInstaller(ctx,mode='apply') {
+  const names={apply:'NeoComposerSetup.cmd',check:'NeoComposerCheck.cmd',rollback:'NeoComposerUninstall.cmd'}
+  if(!Object.hasOwn(names,mode)) return {ok:false,reason:'Unsupported Installer Action'}
+  try {
+    const saved=ctx.storage.get(installerKey,null)
+    if(!validInstallerPath(saved)) return {ok:false,reason:'Select A Trusted Local Installer First'}
+    if(typeof ctx.os?.openExternal!=='function') return {ok:false,reason:'Local Launch Is Unavailable'}
+    const path=saved.replace(/NeoComposerSetup\.cmd$/i,names[mode])
+    if(await ctx.os.openExternal(path)!==true) return {ok:false,reason:'Installer Open Request Failed'}
+    // The SDK acknowledges an open request, NOT process exit or installation.
+    return {ok:true,state:'requested',installed:false}
+  } catch {return {ok:false,reason:'Installer Open Request Failed'}}
+}
+function createEnhancementView({host,jsx,useRef,useState,Button,portableSupported}) {
+  return function EnhancementSettings({ctx}) {
+    const [path,setPath]=useState(()=>{try{return ctx.storage.get(installerKey,'')}catch{return ''}})
+    const [notice,setNotice]=useState(''), [busy,setBusy]=useState(false), pending=useRef(false)
+    const operate=async action=>{
+      if(pending.current)return
+      pending.current=true;setBusy(true);setNotice('')
+      try {
+        const result=action==='choose'?await chooseEnhancementInstaller(ctx):await launchEnhancementInstaller(ctx,action)
+        if(result.path)setPath(result.path)
+        setNotice(result.ok?(action==='choose'?'Installer Selected. Launch Only A Package You Trust.':'Open Request Sent. Check The Installer Result; Installation Is Not Yet Confirmed.'):result.reason)
+      } finally {pending.current=false;setBusy(false)}
+    }
+    const native=host.composer?.behaviorVersion===2, strict=native && host.composer?.strictSteeringVersion===1
+    return jsx('section',{'aria-label':'Native Enhancement',style:{display:'grid',gap:12,padding:16,border:'1px solid var(--ui-stroke-secondary)',borderRadius:8},children:[
+      jsx('h3',{style:{fontWeight:600},children:'Native Enhancement'}),
+      jsx('p',{children:native?'Native Suggestions: Loaded':portableSupported(host)?'SDK Suggestions: Available · Native Enhancement: Not Loaded':'Suggestions: Host Support Required'}),
+      jsx('p',{style:{color:'var(--ui-text-secondary)'},children:strict?'Strict Steering UI: Present — Backend Support Still Requires Verification':'Strict Steering UI: Not Present · Native Shortcuts Are Unchanged'}),
+      jsx('p',{style:{color:'var(--ui-text-secondary)'},children:'One-Time Setup: Select NeoComposerSetup.cmd From Your Trusted Enhancement Package. Future Actions Use That Local Installer, Not The Remote Agent Backend.'}),
+      jsx('code',{style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},children:path||'No Local Installer Selected'}),
+      jsx('div',{style:{display:'flex',flexWrap:'wrap',gap:8},children:[
+        jsx(Button,{variant:'outline',disabled:busy||typeof ctx.os?.pickOpenPath!=='function',onClick:()=>operate('choose'),children:'Select Local Installer'}),
+        jsx(Button,{disabled:busy||!validInstallerPath(path)||typeof ctx.os?.openExternal!=='function',onClick:()=>operate('apply'),children:'Install / Repair'}),
+        jsx(Button,{variant:'outline',disabled:busy||!validInstallerPath(path)||typeof ctx.os?.openExternal!=='function',onClick:()=>operate('check'),children:'Check Installation'}),
+        jsx(Button,{variant:'ghost',disabled:busy||!validInstallerPath(path)||typeof ctx.os?.openExternal!=='function',onClick:()=>operate('rollback'),children:'Uninstall Enhancement'})
+      ]}),
+      jsx('p',{role:'status',style:{color:'var(--ui-text-secondary)'},children:notice}),
+      jsx('p',{style:{fontSize:12,color:'var(--ui-text-secondary)'},children:'Unknown Hermes Versions Are Refused. No Forced Restart, Downgrade Or Automatic Patching. Opening The Installer Does Not Prove It Finished.'})
+    ]})
+  }
+}
 // Inject only the documented SDK/React surface; shared with browser acceptance.
-function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue }) {
+function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Enhancement }) {
   return function PredictionSettings({ ctx }) {
     const [view, setView] = useState(null)
     const [draft, setDraft] = useState(null)
@@ -160,6 +356,7 @@ function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, 
     ] }, name)
     return jsx('section', { 'aria-label': 'Neo Composer settings', style: { padding: 24, maxWidth: 720, color: 'var(--ui-text-primary)', display: 'grid', gap: 20 }, children: [
       jsx('header', { children: [jsx('h2', { style: { fontSize: 20, fontWeight: 600 }, children: 'Neo Composer' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Prediction settings · suggestions stay drafts until you send them.' })] }),
+      typeof Enhancement === 'function' ? jsx(Enhancement, { ctx }) : null,
       !draft ? jsx('p', { role: 'status', children: busy ? 'Loading settings…' : 'No settings loaded.' }) : jsx('div', { style: { display: 'grid', gap: 20 }, children: [
         jsx('label', { style: { display: 'flex', alignItems: 'center', gap: 12 }, children: [jsx(Switch, { checked: draft.enabled, disabled: busy, 'aria-label': 'Ghost-text predictions', onCheckedChange: enabled => setDraft({ ...draft, enabled }) }), 'Ghost-text predictions'] }),
         jsx('fieldset', { children: [jsx('legend', { children: 'Approved providers' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Only these already-connected providers may receive a short conversation excerpt. No credentials or endpoints are added.' }),
@@ -182,11 +379,13 @@ function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, 
   }
 }
 
-const Settings = createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue })
+const Enhancement = createEnhancementView({ host, jsx, useRef, useState, Button, portableSupported })
+const PortableSuggestions = createPortableWidget({ host, jsx, useValue, useEffect, useRef, useState, Button, Popover, PopoverTrigger, PopoverContent, createController })
+const Settings = createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Enhancement })
 export default {
   id: 'neo-next-prompt',
   name: 'Neo Composer',
-  version: '0.4.5',
+  version: '0.5.0-rc.1',
   defaultEnabled: true,
   register(ctx) {
     if (typeof ctx.registerSettingsPage === 'function') {
@@ -198,17 +397,23 @@ export default {
       ctx.register({ id: 'settings', area: ROUTES_AREA, data: { path: '/neo-composer' }, render: () => jsx(Settings, { ctx }) })
       ctx.register({ id: 'settings-nav', area: SIDEBAR_NAV_AREA, data: { path: '/neo-composer', label: 'Neo Composer', codicon: 'settings-gear' } })
     }
-    if (host.composer?.behaviorVersion !== 2 || host.composer?.strictSteeringVersion !== 1) {
-      ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Neo Composer requires composer behavior v2 with strict steering v1. No host files were changed.', children: 'Neo Composer · incompatible host' }) })
-      host.notify({ kind: 'error', message: 'Neo Composer is disabled on this host. Install a compatible interface; no core files were changed by the plugin.' })
+    if (host.composer?.behaviorVersion !== 2) {
+      if (portableSupported(host)) {
+        ctx.register({ id: 'portable', area: 'statusBar.right', render: () => jsx(PortableSuggestions, { ctx }) })
+      } else {
+        ctx.register({ id: 'compatibility', area: 'statusBar.right', render: () => jsx('span', { title: 'Native enhancement or owner-aware draft SDK is required. Settings and enhancement setup remain available.', children: 'Neo Composer · Suggestions Unavailable' }) })
+        host.notify({ kind: 'error', message: 'Neo Composer suggestions require a compatible draft SDK or native enhancement. Settings remain available; no core files were changed.' })
+      }
       return
     }
+    const strict = host.composer.strictSteeringVersion === 1
     ctx.register({ id: 'composer', area: 'composer.behavior.v2', data: {
       protocol: 2,
       create: env => createController(env, ctx.storage),
-      keyAction,
-      readOnlyKeys,
+      keyAction: strict ? keyAction : () => undefined,
+      readOnlyKeys: strict ? readOnlyKeys : {},
       lifecycle: event => profileLifecycle(ctx.storage, event)
     } })
+    if (!strict) ctx.register({ id: 'steering-unavailable', area: 'statusBar.right', render: () => jsx('span', { title: 'Suggestions are enabled. Strict Steering and Neo key overrides are unavailable; native shortcuts are unchanged.', children: 'Neo Composer · Suggestions Only' }) })
   }
 }

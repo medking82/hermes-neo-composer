@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { assertCompatible, runtimeFingerprint, assertPluginBaseline, isComposerSource } from './compat.mjs'
+import { assertCompatible, runtimeFingerprint, assertPluginBaseline, assertPluginPolicy, isComposerSource } from './compat.mjs'
 import { backendTransition, ordinary, atomic as copyAtomic } from './backend.mjs'
 
 const args = process.argv.slice(2)
@@ -30,6 +30,7 @@ if (mode === 'check-update' || mode === 'check-backend-update') {
   console.log(JSON.stringify(assertCompatible(role, head, actual, manifest)))
   process.exit(0)
 }
+const preservePlugin = assertPluginPolicy(manifest) === 'preserve'
 assert(manifest.roles.desktop.heads.includes(head), `Unsupported host version ${head}; stop`)
 assert.deepEqual(runtimeFingerprint(root,manifest.roles.desktop.heads,manifest.runtime),manifest.runtime,'Packaged Electron runtime drift; refuse renderer replacement')
 const dirty = execFileSync('git',['-C',root,'status','--porcelain','--untracked-files=all'],{encoding:'utf8'}).split(/\r?\n/).filter(Boolean).map(line=>line.slice(3).replaceAll('\\','/'))
@@ -88,17 +89,18 @@ if(mode==='rollback') {
   assert.deepEqual(missingRendererAssets(path.join(target,'index.html')),[])
   assert.deepEqual(protectedNow(),receipt.protected)
   save({...receipt,state:'rolled_back'})
-  console.log(JSON.stringify({state:'rolled_back',verified:true,windowReloaded:false,decisionsPreserved:true}))
+  console.log(JSON.stringify({state:'rolled_back',verified:true,windowReloaded:false,pluginPreserved:preservePlugin,decisionsPreserved:true}))
 } else if(same(state(),after)) {
+  for(const [name,sha] of Object.entries(manifest.renderer))assert.equal(digest(path.join(target,name)),sha,`Installed renderer drift: ${name}`)
   const receipt=JSON.parse(fs.readFileSync(receiptFile,'utf8'))
   assert.equal(receipt.releaseSha,releaseSha)
   assert.deepEqual(protectedNow(),receipt.protected)
   assert.deepEqual(missingRendererAssets(path.join(target,'index.html')),[])
-  console.log(JSON.stringify({state:'already_installed',verified:true,windowReloaded:false}))
+  console.log(JSON.stringify({state:'already_installed',verified:true,windowReloaded:false,pluginPreserved:preservePlugin}))
 } else {
   assert.deepEqual(state(),before,'Unknown source/renderer/plugin edits; refuse overwrite')
   for(const name of introducedRenderer)assert(!fs.existsSync(path.join(target,name)),`Renderer ownership changed since preparation: ${name}`)
-  assertPluginBaseline(pluginDir,manifest.pluginFiles)
+  if(!preservePlugin)assertPluginBaseline(pluginDir,manifest.pluginFiles)
   assert.deepEqual(missingRendererAssets(path.join(candidate,'index.html')),[])
   for(const entry of manifest.sources)assert.equal(digest(path.join(bundle,'source',entry.path)),entry.after,`Source payload drift: ${entry.path}`)
   for(const entry of manifest.pluginFiles)assert.equal(digest(path.join(bundle,'dist',safe(entry.path))),entry.after,`Plugin payload drift: ${entry.path}`)
@@ -124,6 +126,6 @@ if(mode==='rollback') {
     assert.deepEqual(missingRendererAssets(path.join(target,'index.html')),[])
     assert.deepEqual(protectedNow(),protectedBefore)
     save({state:'installed',releaseSha,protected:protectedBefore,pluginDir,verified:true})
-    console.log(JSON.stringify({state:'installed',verified:true,pluginDir,protectedUnchanged:true,windowReloaded:false}))
+    console.log(JSON.stringify({state:'installed',verified:true,pluginDir,protectedUnchanged:true,windowReloaded:false,pluginPreserved:preservePlugin}))
   }
 }

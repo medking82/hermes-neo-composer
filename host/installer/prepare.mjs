@@ -6,7 +6,7 @@ import os from 'node:os'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { runtimeFingerprint, assertPluginBaseline, isComposerSource } from './compat.mjs'
+import { runtimeFingerprint, assertPluginBaseline, assertPluginPolicy, isComposerSource } from './compat.mjs'
 const [rootArg,bundleArg]=process.argv.slice(2)
 assert(rootArg&&bundleArg)
 const root=path.resolve(rootArg),bundle=path.resolve(bundleArg)
@@ -24,7 +24,7 @@ for(const e of seed.sources){safe(e.path);assert(isComposerSource(e.path));asser
 const {resolveDesktopHermesHome}=await import(pathToFileURL(path.join(root,'apps/desktop/electron/data-paths.mjs')).href)
 const home=resolveDesktopHermesHome({home:os.homedir(),directoryExists:fs.existsSync,readWindowsHome:()=>process.platform==='win32'?execFileSync('powershell',['-NoProfile','-Command',"[Console]::Write([Environment]::GetEnvironmentVariable('HERMES_HOME','User'))"],{encoding:'utf8'}).trim():null})
 const pluginRoot=path.join(home,'desktop-plugins'),pluginDir=path.join(pluginRoot,'neo-next-prompt')
-assertPluginBaseline(pluginDir,seed.pluginFiles)
+if(assertPluginPolicy(seed)!=='preserve')assertPluginBaseline(pluginDir,seed.pluginFiles)
 for(const e of seed.pluginFiles){safe(e.path);assert.equal(hash(path.join(bundle,'dist',e.path)),e.after)}
 for(const e of seed.sources)if(e.after!==null){const dest=path.join(bundle,'source',e.path);fs.mkdirSync(path.dirname(dest),{recursive:true});if(fs.existsSync(dest))assert.equal(hash(dest),e.after);else fs.copyFileSync(path.join(bundle,'checkout',e.path),dest,fs.constants.COPYFILE_EXCL)}
 const renderer={}

@@ -1,10 +1,20 @@
 {
   "id": "neo-next-prompt",
-  "version": "0.4.5",
+  "version": "0.5.0-rc.1",
   "composer_protocol": 2,
   "strict_steering_protocol": 1,
   "supported_host_heads": [
-    "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+    "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
+    "3752497cc4d214023f4736559a5f0e58621af9ff"
   ],
-  "plugin_sha256": "d60c10137b78ab7b32d4cd5418cdecee6a3b943d0a0941136c0f8fede9786082"
+  "sdk_mode": {
+    "capability_probed": true,
+    "requires_strict_steering": false,
+    "auto_send": false
+  },
+  "native_mode": {
+    "composer_protocol": 2,
+    "strict_steering_protocol": 1
+  },
+  "plugin_sha256": "8bb931ac7b35343d8ea4aee2f5dca84870b5a594ca1c293d7388333138a96df3"
 }

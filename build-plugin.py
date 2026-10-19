@@ -14,7 +14,7 @@ for line in entry.splitlines():
     else:
         body.append(line)
 modules = []
-for name in ['controller.mjs', 'settings.mjs']:
+for name in ['controller.mjs', 'portable.mjs', 'enhancement.mjs', 'settings.mjs']:
     source = (BASE / 'plugin' / name).read_text()
     if 'import ' in source:
         raise ValueError('Unsupported module dependency')
@@ -22,9 +22,11 @@ for name in ['controller.mjs', 'settings.mjs']:
 text = '\n'.join(imports + modules + body) + '\n'
 out = BASE / 'dist'; out.mkdir(exist_ok=True)
 (out / 'plugin.js').write_text(text)
-manifest = {'id': 'neo-next-prompt', 'version': '0.4.5', 'composer_protocol': 2,
+manifest = {'id': 'neo-next-prompt', 'version': '0.5.0-rc.1', 'composer_protocol': 2,
             'strict_steering_protocol': 1,
-            'supported_host_heads': ['d923a5eb487a17c0a68801bba9ef0f56c81040a8'],
+            'supported_host_heads': ['d923a5eb487a17c0a68801bba9ef0f56c81040a8', '3752497cc4d214023f4736559a5f0e58621af9ff'],
+            'sdk_mode': {'capability_probed': True, 'requires_strict_steering': False, 'auto_send': False},
+            'native_mode': {'composer_protocol': 2, 'strict_steering_protocol': 1},
             'plugin_sha256': hashlib.sha256(text.encode()).hexdigest()}
 (out / 'compatibility.json').write_text(json.dumps(manifest, indent=2))
 print(json.dumps(manifest))

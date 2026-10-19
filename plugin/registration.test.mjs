@@ -28,8 +28,8 @@ test('package metadata uses the same Neo Composer release version', () => {
   assert.equal(manifest.match(/^version: "([^"]+)"$/m)?.[1], plugin.version)
 })
 
-const harness = ({ behaviorVersion = 2, strictSteeringVersion = 1, withSettingsPage = true } = {}) => {
-  host.composer = { behaviorVersion, strictSteeringVersion }
+const harness = ({ behaviorVersion = 2, strictSteeringVersion = 1, withSettingsPage = true, composer } = {}) => {
+  host.composer = composer ?? { behaviorVersion, strictSteeringVersion }
   const registered = []
   const pages = []
   const notices = []
@@ -53,10 +53,31 @@ const harness = ({ behaviorVersion = 2, strictSteeringVersion = 1, withSettingsP
 
 const areas = registered => registered.map(entry => entry.area)
 
-test('an old host without strict steering support does not register unsafe keys', () => {
+test('missing strict steering leaves native suggestions registered without overriding native keys', () => {
   const { registered, notices } = harness({ strictSteeringVersion: null })
+  const contribution = registered.find(item => item.area === 'composer.behavior.v2')
+  assert.ok(contribution, 'suggestions must not depend on strict Steering')
+  assert.equal(contribution.data.keyAction({ key: 'Enter', busy: true, ctrlKey: true }), undefined)
+  assert.equal(contribution.data.keyAction({ key: 'Enter', busy: true }), undefined)
+  assert.deepEqual(contribution.data.readOnlyKeys, {})
+  assert.ok(!notices.some(item => item.kind === 'error'))
+})
+
+test('an official SDK host registers portable suggestions without a private native seam', () => {
+  const atom = value => ({ get: () => value, subscribe: () => () => {} })
+  host.activeConnectionId = () => 'fixture-connection'
+  host.state = {
+    focusedSessionId: atom('runtime-fixture'), focusedStoredSessionId: atom('stored-fixture'),
+    focusedSessionOwner: atom({ connectionId: 'fixture-connection', profile: 'default' }),
+    connectionId: atom('fixture-connection'), profile: atom('default'), busy: atom(false)
+  }
+  const { registered, pages, notices } = harness({ composer: {
+    getDraft: async () => '', insertText: async () => true, focus: () => {}
+  } })
+  assert.equal(pages.length, 1)
+  assert.ok(registered.some(item => item.id === 'portable' && item.area === 'statusBar.right' && typeof item.render === 'function'), 'official SDK keeps a single window-level suggestions preview; slots do not expose a composer owner')
   assert.ok(!areas(registered).includes('composer.behavior.v2'))
-  assert.equal(notices[0]?.kind, 'error')
+  assert.ok(!notices.some(item => item.kind === 'error'))
 })
 
 test('settings register under Settings ▸ Plugins with no sidebar or route row', () => {
@@ -88,6 +109,8 @@ test('the settings page render returns the settings view element', () => {
   assert.equal(heading.props.children, 'Neo Composer')
   assert.equal(plugin.name, 'Neo Composer')
   assert.equal(plugin.id, 'neo-next-prompt')
+  const enhancements = shallow.props.children.filter(child => typeof child?.type === 'function').map(child => child.type(child.props))
+  assert.ok(enhancements.some(child => child?.props?.['aria-label'] === 'Native Enhancement'), 'enhancement controls must render before prediction settings load')
 })
 
 test('an incompatible host gets the status-bar notice and no composer contribution', () => {

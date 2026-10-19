@@ -1,5 +1,5 @@
 // Inject only the documented SDK/React surface; shared with browser acceptance.
-export function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue }) {
+export function createSettingsView({ jsx, useEffect, useRef, useState, Button, Switch, Checkbox, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Enhancement }) {
   return function PredictionSettings({ ctx }) {
     const [view, setView] = useState(null)
     const [draft, setDraft] = useState(null)
@@ -37,6 +37,7 @@ export function createSettingsView({ jsx, useEffect, useRef, useState, Button, S
     ] }, name)
     return jsx('section', { 'aria-label': 'Neo Composer settings', style: { padding: 24, maxWidth: 720, color: 'var(--ui-text-primary)', display: 'grid', gap: 20 }, children: [
       jsx('header', { children: [jsx('h2', { style: { fontSize: 20, fontWeight: 600 }, children: 'Neo Composer' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Prediction settings · suggestions stay drafts until you send them.' })] }),
+      typeof Enhancement === 'function' ? jsx(Enhancement, { ctx }) : null,
       !draft ? jsx('p', { role: 'status', children: busy ? 'Loading settings…' : 'No settings loaded.' }) : jsx('div', { style: { display: 'grid', gap: 20 }, children: [
         jsx('label', { style: { display: 'flex', alignItems: 'center', gap: 12 }, children: [jsx(Switch, { checked: draft.enabled, disabled: busy, 'aria-label': 'Ghost-text predictions', onCheckedChange: enabled => setDraft({ ...draft, enabled }) }), 'Ghost-text predictions'] }),
         jsx('fieldset', { children: [jsx('legend', { children: 'Approved providers' }), jsx('p', { style: { color: 'var(--ui-text-secondary)' }, children: 'Only these already-connected providers may receive a short conversation excerpt. No credentials or endpoints are added.' }),

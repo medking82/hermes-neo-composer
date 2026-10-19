@@ -10,6 +10,10 @@
 
 const sdk = `
 export const host = { composer: undefined, notify: () => {} }
+export const useValue = value => value.get()
+export const Popover = 'Popover'
+export const PopoverTrigger = 'PopoverTrigger'
+export const PopoverContent = 'PopoverContent'
 export const ROUTES_AREA = 'routes'
 export const SIDEBAR_NAV_AREA = 'sidebar.nav'
 export const Button = 'Button'
@@ -25,7 +29,7 @@ export const SelectValue = 'SelectValue'
 const react = `
 export const useEffect = () => {}
 export const useRef = () => ({ current: 0 })
-export const useState = value => [value, () => {}]
+export const useState = value => [typeof value === 'function' ? value() : value, () => {}]
 `
 
 const jsxRuntime = `

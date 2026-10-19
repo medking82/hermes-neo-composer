@@ -107,6 +107,32 @@ export function createController(env,storage) {
   return {
     update(next){state=next;publish();start()},
     refresh(){publish();start()},
+    capture(){
+      const text=visible(), candidate=row
+      if(!text) return null
+      let prior
+      try {prior=JSON.stringify(ledger(storage)[key])} catch {return null}
+      let committed=false
+      return Object.freeze({
+        text,
+        current:()=>row===candidate && visible()===text,
+        commit(){
+          if(committed) return true
+          try {
+            // An insert can finish after the component unmounts. Bind its
+            // decision to the captured owner, but never erase a later choice.
+            if(JSON.stringify(ledger(storage)[key])!==prior) return false
+            const d=decision(candidate,'consumed')
+            remember(storage,key,d)
+            committed=true
+            if(row===candidate) row=null
+            if(!disposed) publish()
+            acknowledge(d)
+            return true
+          } catch {return false}
+        }
+      })
+    },
     decide(status){
       const text=visible()
       if(!text||!['consumed','dismissed'].includes(status)) return null

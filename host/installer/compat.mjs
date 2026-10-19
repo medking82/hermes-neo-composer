@@ -35,6 +35,14 @@ export function runtimeFingerprint(root, heads, approvedBaseline) {
   return actual
 }
 
+export function assertPluginPolicy(manifest) {
+  assert(Array.isArray(manifest.pluginFiles), 'Missing Plugin File Inventory')
+  const policy = manifest.pluginPolicy ?? 'transactional'
+  assert(['transactional', 'preserve'].includes(policy), 'Unknown Plugin Policy')
+  if (policy === 'preserve') assert.equal(manifest.pluginFiles.length, 0, 'A Preserved Plugin Must Not Have A Write Inventory')
+  return policy
+}
+
 export function assertPluginBaseline(directory, entries) {
   const names = entries.map(entry => {
     assert(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(entry.path), 'Invalid plugin baseline path')

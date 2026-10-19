@@ -1,0 +1,4 @@
+# Preserve the exact CRLF bytes of the Windows launchers.
+NeoComposerSetup.cmd -text whitespace=trailing-space,space-before-tab,cr-at-eol
+NeoComposerCheck.cmd -text whitespace=trailing-space,space-before-tab,cr-at-eol
+NeoComposerUninstall.cmd -text whitespace=trailing-space,space-before-tab,cr-at-eol

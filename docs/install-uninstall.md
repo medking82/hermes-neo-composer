@@ -1,10 +1,11 @@
 # Neo Composer — install, uninstall and official updates
 
-Neo Composer 0.4.5 keeps prediction, preferences and composer policy in the plugin. The separate host patch supplies the native composer seam, strict Steering delivery receipts and session-owned image staging that the v0.22.2 plugin API lacks. Publication does not authorize installation on another target; a shared-runtime switch needs separate authorization. Internal ID `neo-next-prompt` is retained so existing settings and decisions are not migrated.
+Neo Composer 0.5.0-rc.1 keeps prediction, preferences and composer policy in the plugin. SDK suggestions do not require the native seam. The settings page exposes a separately selected local setup/check/uninstall entry even when prediction settings cannot load; see [upgrade resilience](upgrade-resilience.md). The separate host patch supplies the native composer seam, strict Steering delivery receipts and session-owned image staging that the v0.22.2 plugin API lacks. Publication does not authorize installation on another target; a shared-runtime switch needs separate authorization. Internal ID `neo-next-prompt` is retained so existing settings and decisions are not migrated.
 
 ## Supported boundary
 
-- Hermes v0.22.2, exact source commit `d923a5eb487a17c0a68801bba9ef0f56c81040a8`.
+- SDK mode probes the public draft/owner APIs; it does not require a native behavior or strict-Steering version. Backend inference compatibility remains independently guarded.
+- Current native Windows source: `3752497cc4d214023f4736559a5f0e58621af9ff`. The strict backend remains pinned to `d923a5eb487a17c0a68801bba9ef0f56c81040a8`; local Desktop setup does not install or restart it.
 - A backend source bundle and a separately fingerprinted Windows Desktop bundle. A Windows bundle is specific to its frozen predecessor; it is not a universal installer for arbitrary modified installations.
 - Node 24 or newer and Git. Install the unified plugin through the existing Hermes plugin mechanism; its host patch is a separate, explicit operation.
 - No replacement of `Hermes.exe`, `app.asar`, the install stamp, Electron main or either preload. No new updater, background daemon, credentials, automatic restart or force mode.
@@ -54,7 +55,7 @@ Uninstall the Desktop host patch with:
 node install.mjs rollback ROOT BUNDLE
 ```
 
-This restores the previous source, renderer entry files and Desktop plugin files. It removes only renderer assets recorded as introduced by this release, and refuses to remove an introduced asset whose content has since changed. Pre-existing assets and all protected native files are preserved. Retain `backup/`, `receipt.json` and `release.json` for rollback ownership. Uninstalling this patch restores the prior state; it does not promise that prior state was an unmodified official installation.
+Legacy transactional bundles restore the previous source, renderer entry files and Desktop plugin files. New independent bundles declare `pluginPolicy: preserve` with an empty plugin write inventory: they restore only the native enhancement and keep the separately managed SDK plugin intact. It removes only renderer assets recorded as introduced by this release, and refuses to remove an introduced asset whose content has since changed. Pre-existing assets and all protected native files are preserved. Retain `backup/`, `receipt.json` and `release.json` for rollback ownership. Uninstalling this patch restores the prior state; it does not promise that prior state was an unmodified official installation.
 
 ## Normal official upgrades
 
@@ -65,10 +66,10 @@ The supported route is **uninstall this host patch on both machines first, then 
 3. Check the actual new backend and Desktop versions independently. Reinstall only an explicitly compatible bundle. An unknown version is refused; the plugin must not substitute redirect/interrupt for unavailable strict Steering.
 4. An old uninstaller is not a downgrade tool. After a version change, it refuses to restore old backups over the newer installation.
 
-The plugin package can remain installed while its dependent host capability is unavailable, but the strict contribution is disabled with a notice. An uninstalled/disabled enhancement supplies no strict-Steering guarantee; do not mistake the official client's original shortcut behavior for Neo Composer's path.
+The plugin package can remain installed while a native capability is unavailable. SDK preview/insertion remains available when its public owner/draft APIs are present; behavior v2 without strict support retains native suggestions but does not override busy keys. Only unsupported enhancements are disabled with a notice. An uninstalled/disabled enhancement supplies no strict-Steering guarantee; do not mistake the official client's original shortcut behavior for Neo Composer's path.
 
 ## Verification limits
 
 File-operation acceptance and real runtime activation are separate. The backend installer was exercised against an isolated checkout of the exact official source. The Desktop installer was exercised against a copied Windows installation, including idempotence, foreign-edit refusal, native-file preservation and removal of introduced renderer assets. Synthetic version-change tests verify refusal, not an actual future-version upgrade.
 
-The official target checked during this delivery is v0.22.2. An official update availability check is not a cross-version upgrade rehearsal. No claim is made that an old patch will work unchanged on future Hermes releases. A separately coordinated activation of 0.4.5-rc.1 and real packaged-window image-Steering acceptance have completed on the bound target; see [validation](validation-0.4.5.md). The formal 0.4.5 package preserves those host/renderer/installer bytes, with only plugin version metadata and documentation changed. The running installation remains identified as 0.4.5-rc.1; do not edit its applied manifests or receipts, or replay installation merely to change that label.
+The following 0.4.5 activation record is historical, not the identity or acceptance of the current 0.5.0-rc.1 candidate. The official target checked during that delivery was v0.22.2. An official update availability check is not a cross-version upgrade rehearsal. No claim is made that an old patch will work unchanged on future Hermes releases. A separately coordinated activation of 0.4.5-rc.1 and real packaged-window image-Steering acceptance have completed on the bound target; see [validation](validation-0.4.5.md). The formal 0.4.5 package preserves those host/renderer/installer bytes, with only plugin version metadata and documentation changed. The running installation remains identified as 0.4.5-rc.1; do not edit its applied manifests or receipts, or replay installation merely to change that label.

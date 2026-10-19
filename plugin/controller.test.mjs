@@ -96,3 +96,27 @@ test('typing, a ready row, or dispose cancels the retry timer',async t=>{
   g.controller.dispose()
   t.mock.timers.tick(610000);await tick();assert.equal(requests.length,2,'dispose cancels the retry')
 })
+
+test('portable acceptance commits only after an acknowledged insert, even after view disposal', async () => {
+  const f = fixture(); f.controller.update({enabled:true,empty:true}); await tick()
+  assert.equal(typeof f.controller.capture, 'function')
+  const offer = f.controller.capture()
+  assert.equal(offer.text, '运行解析器回归测试')
+  assert.deepEqual(f.storage.get('decisions', {}), {})
+  f.controller.dispose()
+  assert.equal(offer.current(), false)
+  assert.equal(offer.commit(), true)
+  assert.equal(offer.commit(), true)
+  assert.equal(Object.values(f.storage.get('decisions', {}))[0].status, 'consumed')
+  assert.equal(f.requests.filter(r => r.path === '/decision').length, 1)
+})
+
+test('a captured portable offer cannot overwrite a later durable dismissal', async () => {
+  const f = fixture(); f.controller.update({enabled:true,empty:true}); await tick()
+  assert.equal(typeof f.controller.capture, 'function')
+  const offer = f.controller.capture()
+  assert.ok(f.controller.decide('dismissed'))
+  assert.equal(offer.current(), false)
+  assert.equal(offer.commit(), false)
+  assert.equal(Object.values(f.storage.get('decisions', {}))[0].status, 'dismissed')
+})

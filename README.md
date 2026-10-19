@@ -1,12 +1,18 @@
 # Neo Composer
 
-A standalone Hermes Desktop plugin for persistent, session-bound ghost-text suggestions and predictable busy-turn keys. The host retains native editing, focus and send ownership; model routing, settings and persistence live here.
+A standalone Hermes Desktop plugin for session-bound suggestions, with an official-SDK compatibility mode and an optional native enhancement. The host retains editing, focus and send ownership; model routing, settings and persistence live here.
 
-**Compatibility:** **0.4.5** targets Hermes **v0.22.2**, with the separate, explicitly installed **composer behavior v2 + strict steering receipts v1** host seam. It is **not plug-and-play on an unmodified official Desktop build**. Unknown backend interfaces fail closed. An upstream seam proposal is separate from this plugin; no merge is implied.
+**Candidate: 0.5.0-rc.1.** Missing strict Steering no longer disables suggestions. On an owner-aware official draft SDK, use the **Neo Composer · Suggestions** status-bar button to preview and explicitly **Insert As Draft**. This mode does not supply native gray text or Tab/Esc arbitration and never sends. Native suggestions require behavior v2; Neo busy-key overrides additionally require strict receipts v1. Prediction still needs a compatible backend and explicit provider settings; unknown backend interfaces fail closed.
 
-For the newer Desktop commit `9e01b44dd23978f9ff40b7837467f3a9f1582130`, see the [Desktop-only compatibility candidate](docs/compatibility-desktop-9e01b44.md). It retains the existing pinned backend and does not change plugin settings or authorize a live switch; the older host patch is not interchangeable with it.
+The current native adaptation targets Desktop `3752497cc4d214023f4736559a5f0e58621af9ff`, with the existing pinned backend. See [upgrade resilience and local setup](docs/upgrade-resilience.md). The [9e01b44 adaptation](docs/compatibility-desktop-9e01b44.md) is historical and is not interchangeable. The [existing upstream seam proposal](https://github.com/NousResearch/hermes-agent/pull/139051) remains separate and unmerged; no upstream acceptance is assumed.
 
-## Interaction
+## SDK Compatibility Mode
+
+Open **Neo Composer · Suggestions** in the status bar while the focused chat is idle and its draft is empty. Preview, insert as a draft, dismiss or refresh explicitly. Closing the popover stops its controller. Connection/profile/session changes and a changed draft refuse stale insertion; a consumed decision is recorded only after the SDK acknowledges the write. Native shortcuts are untouched. The status-bar surface is deliberate: ordinary composer slots do not expose an owner-qualified per-surface context.
+
+## Native Interaction — Enhancement Required
+
+These shortcuts describe the full native enhancement with a verified strict backend, not SDK compatibility mode. With behavior v2 but no strict interface, suggestions remain registered and Neo key overrides are omitted.
 
 - After a completed turn, an empty, focused composer may show a suggestion. This is not as-you-type autocomplete.
 - **Tab** accepts it as an editable, undoable draft. It does not send.
@@ -34,7 +40,7 @@ Unbound legacy API-key catalog aliases, root-borrowed account identities, ambigu
 
 This repository is a unified agent-plugin package (`plugin.yaml`, Python backend and `desktop/plugin.js`). Install through Hermes' existing plugin flow, explicitly enable the backend and the Desktop half, and select prediction settings. On a split PC/backend installation, the Python package belongs on the backend host; the Desktop half belongs in that PC's resolved Desktop plugin directory. Never copy credentials between hosts.
 
-**Install the host seam separately first.** The fixed-release installers under `host/installer/` provide backend and Windows Desktop check/apply/rollback, with frozen preimages and verified backups. Follow [installation, uninstall and official upgrades](docs/install-uninstall.md). `host/v0.22.2-strict.patch` remains the developer source diff against exact release `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, not a force installer. The plugin itself never modifies core files; the host bundle never replaces the Electron executable, ASAR, main or preloads. Official upgrades remain owned by the official updater: uninstall the host patch first, upgrade normally, and only then use an explicitly compatible replacement bundle.
+**The host seam is optional for SDK mode and required for the full native interaction.** The fixed-release installers under `host/installer/` provide backend and Windows Desktop check/apply/rollback, with frozen preimages and verified backups. Follow [installation, uninstall and official upgrades](docs/install-uninstall.md). `host/v0.22.2-strict.patch` remains the developer source diff against exact release `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, not a force installer. The plugin itself never modifies core files; its settings explicitly launch a separately selected local installer through the SDK OS door. New independent enhancement bundles preserve the base SDK plugin during install and uninstall. The host bundle never replaces the Electron executable, ASAR, main or preloads. Official upgrades remain owned by the official updater: uninstall the host patch first, upgrade normally, and only then use an explicitly compatible replacement bundle.
 
 Back up the previous package and renderer controls. Refuse unknown edits/version drift, preserve the existing Electron executable and main/preload, and retain a hash-bound rollback. The validated deployment uses per-machine private manifests; those contain local paths and are intentionally not published. Do not regenerate an install manifest against an unknown modified target. Disable the prediction setting before changing host versions. The current backend does not remount an already mounted Python API router: a controlled backend restart may be needed; reloading Desktop plugins alone does not prove backend activation.
 
@@ -52,6 +58,8 @@ python build-plugin.py
 
 `build-plugin.py` deterministically creates `dist/plugin.js`; copy the verified output to `desktop/plugin.js` when preparing a release. Its only runtime imports are the Hermes plugin SDK and the host's React.
 
+### Historical Validation
+
 The v0.4.3 validation record covers backend unit/integration contracts, native Desktop composer tests, TypeScript, repository checks, Windows build, idempotent install/rollback and foreign-edit refusal. Its browser fixture uses real Composer, prompt actions and steering handler; inference and tool execution are deterministic substitutes. A separate real subscription-backed prediction on synthetic input succeeded without changing main configuration; cache reuse was verified by deterministic service/browser tests.
 
 The image-Steering implementation was installed and accepted in the real Windows Desktop window as **0.4.5-rc.1**: native busy Ctrl+Enter delivered the image reference, the original agent actually read its pixels through `vision_analyze`, the matching receipt cleared text and thumbnail together, explicit rejection retained both without queue fallback, and ordinary Enter later arrived as a separate user turn with zero images. **0.4.5 changes only version metadata, generated plugin version/hash and documentation; host behavior, renderer and installers are unchanged.** The installed RC identity and rollback receipts were not relabelled or reinstalled for publication. This is not native multimodal Steering or a guarantee of automatic image inspection. Full regression results remain non-green: 87 Python failures, 250 setup errors and 2 UI failures were matched to the fixed baseline/environment; blocked test bodies remain unexercised. See [validation and remaining limits](docs/validation-0.4.5.md) and [the strict-Steering and image contract](docs/strict-steering.md). Unknown dirty packaged shells still require independently verified, explicitly approved native fingerprints; never regenerate trust from arbitrary dirty bytes.
@@ -67,7 +75,7 @@ The two concepts below were generated through the existing ChatGPT image-generat
 ![Settings concept — not a runtime screenshot](docs/images/settings-concept.png)
 ![Workflow concept — not a runtime screenshot](docs/images/workflow-concept.png)
 
-This is a real rendering of the plugin settings in an isolated browser fixture with a deterministic provider catalog, **not the current Desktop window**:
+This historical 0.4.x image is a real rendering of the plugin settings in an isolated browser fixture with a deterministic provider catalog, **not the current Desktop window**:
 
 ![Real isolated settings fixture](docs/images/settings-fixture.png)
 
