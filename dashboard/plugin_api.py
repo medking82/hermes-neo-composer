@@ -49,7 +49,9 @@ def _package():
             sys.modules[name] = module
             try:
                 spec.loader.exec_module(module)
-                module.register(None)
+                from importlib import import_module
+                bind = import_module(name + '.sdk_host').create_context
+                module.register(bind(root))
             except BaseException:
                 sys.modules.pop(name, None)
                 raise
@@ -61,7 +63,10 @@ def _package():
 
 
 def service():
-    return _package().get_service()
+    try:
+        return _package().get_service()
+    except RuntimeError as exc:
+        raise HTTPException(404, 'next-prompt host prediction SDK is unavailable') from exc
 
 
 @router.get('/settings')

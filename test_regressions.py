@@ -7,20 +7,44 @@ from unittest.mock import patch
 
 
 class RegressionTests(unittest.TestCase):
-    def test_real_catalog_path_reads_token_type_not_presence_boolean(self):
-        import json, time
+    def test_public_catalog_never_reads_credentials_or_infers_oauth_billing(self):
+        import builtins
+        import json
+        import os
         from .inventory import load_catalog
         with TemporaryDirectory() as directory:
             home = Path(directory)
-            home.joinpath('auth.json').write_text('{}')
+            auth = home / 'auth.json'
+            auth.write_text('fixture-first-auth')
+            original_stat = auth.stat()
             meta = {'anthropic': {'models': {'small': {'modalities': {'input': ['text'], 'output': ['text']}, 'limit': {'context': 16000, 'output': 2048}, 'cost': {'input': 1, 'output': 1}}}}}
             home.joinpath('models_dev_cache.json').write_text(json.dumps(meta))
-            cache = {'anthropic': {'fp': 'owner', 'at': time.time(), 'models': ['small']}}
-            token = 'sk-ant-' + 'oat-fixture'
-            with patch('hermes_constants.get_hermes_home', return_value=home), patch('hermes_cli.config.load_config_readonly', return_value={}), patch('hermes_cli.config.get_env_value_prefer_dotenv', side_effect=lambda name: token if name == 'ANTHROPIC_API_KEY' else ''), patch('hermes_cli.models._load_provider_models_cache', return_value=cache), patch('hermes_cli.models._credential_fingerprint', return_value='owner'), patch('hermes_cli.auth._load_auth_store', return_value={}), patch.dict('os.environ', {'ANTHROPIC_API_KEY': token, 'ANTHROPIC_TOKEN': '', 'CLAUDE_CODE_OAUTH_TOKEN': ''}):
-                self.assertEqual(load_catalog()[0]['billing'], 'unknown')
-                with patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'different-launch-profile'}):
-                    self.assertEqual(load_catalog(), [], 'Host raw-env fingerprint cannot certify another profile key')
+            payload = {'providers': [{'slug': 'anthropic', 'authenticated': True, 'models': ['small'], 'source': 'hermes'}]}
+            protected = {path.resolve() for path in (auth, home / '.env', home / '.anthropic_oauth.json',
+                         Path.home() / '.codex/auth.json', Path.home() / '.claude/.credentials.json')}
+            path_open, builtin_open = Path.open, builtins.open
+            def guard(original):
+                def open_file(path, *args, **kwargs):
+                    if isinstance(path, (str, os.PathLike)) and Path(path).resolve() in protected:
+                        raise AssertionError('Plugin opened credential contents')
+                    return original(path, *args, **kwargs)
+                return open_file
+            def catalog():
+                with patch.object(Path, 'open', guard(path_open)), patch('builtins.open', guard(builtin_open)):
+                    return load_catalog()[0]
+            with patch('hermes_constants.get_hermes_home', return_value=home), patch('hermes_cli.config.load_config_readonly', return_value={}), patch('hermes_cli.inventory.build_models_payload', return_value=payload):
+                first = catalog()
+                self.assertEqual(first['billing'], 'unknown')
+                self.assertFalse(first['priced'])
+                auth.write_text('fixture-other-auth')
+                self.assertEqual(auth.stat().st_size, original_stat.st_size)
+                os.utime(auth, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                second = catalog()
+                self.assertEqual(first['account_scope'], second['account_scope'])
+                auth.write_text('fixture-auth-metadata-change-is-longer')
+                third = catalog()
+                self.assertNotEqual(first['account_scope'], third['account_scope'])
+                self.assertNotIn('fixture-other-auth', json.dumps(third))
 
     def test_settings_refuse_symlinked_profile_data(self):
         from .settings import save_settings, DEFAULTS
@@ -32,15 +56,19 @@ class RegressionTests(unittest.TestCase):
 
     def test_price_metadata_does_not_invalidate_service_and_plan_is_bound(self):
         package = importlib.import_module(__package__)
+        from types import SimpleNamespace
+        from unittest.mock import Mock
         with TemporaryDirectory() as directory:
             home = Path(directory)
-            a = {'route': {'provider': 'api', 'model': 'small', 'account_scope': 'owner', 'input_cost': 1}, 'settings': {'enabled': True}, 'reason': 'price fresh'}
-            b = {**a, 'route': {**a['route'], 'input_cost': None}, 'reason': 'price stale'}
-            with patch.object(package, '_owner_home', home), patch.object(package, '_service', None), patch('hermes_constants.get_hermes_home', return_value=home), patch(__package__ + '.llm_once.validate_host'), patch('hermes_cli.config.load_config_readonly', return_value={}), patch(__package__ + '.llm_once.prediction_plan', side_effect=[a, b]), patch(__package__ + '.llm_once.complete') as completion:
+            a = {'provider': 'api', 'model': 'small', 'account_scope': 'owner', 'input_cost': 1, 'available': True, 'text': True}
+            b = {**a, 'input_cost': None}
+            settings = {'enabled': True, 'providers': ['api'], 'model': 'api/small', 'fallback': ''}
+            ctx = SimpleNamespace(plugin_id='neo-next-prompt', llm=SimpleNamespace(complete=Mock()), register_auxiliary_task=Mock())
+            with patch.object(package, '_owner_home', home), patch.object(package, '_context', ctx), patch.object(package, '_service', None), patch('hermes_constants.get_hermes_home', return_value=home), patch('hermes_cli.config.load_config_readonly', return_value={'plugins': {'enabled': ['neo-next-prompt']}}), patch(__package__ + '.settings.load_settings', return_value=settings), patch.object(package, '_settings_catalog', side_effect=[[a], [b]]), patch(__package__ + '.sdk_llm.complete') as completion:
                 first = package.get_service()
                 self.assertIs(first, package.get_service())
                 first.complete({'history': []})
-                self.assertEqual(completion.call_args.kwargs['expected_plan'], a)
+                self.assertEqual(completion.call_args.kwargs['expected_plan']['route'], a)
                 self.assertEqual(completion.call_args.kwargs['owner_home'], home)
 
     def test_billing_never_infers_subscription_or_pool_as_dollar_price(self):

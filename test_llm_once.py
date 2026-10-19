@@ -1,105 +1,100 @@
+"""Public SDK adapter regressions. Host retries/fallbacks are operator-permitted.
+
+Private transport, byte pins and plugin-owned retry ladders are retired.
+"""
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-
 from .llm_once import complete
 
 
 class AdapterTests(unittest.TestCase):
     def setUp(self):
-        self.plan = patch('package.llm_once.prediction_plan', create=True, return_value={
-            'route': {'provider': 'openai-codex', 'model': 'selected-small'},
-            'reason': 'Explicit low-cost fallback', 'settings': {}})
-        self.plan.start()
-        self.addCleanup(self.plan.stop)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.scope = patch('hermes_constants.get_hermes_home', return_value=self.home)
+        self.scope.start()
+        self.addCleanup(self.scope.stop)
+        self.plan = {'route': {'provider': 'openai-codex', 'model': 'fixture-small', 'account_scope': 'owner'},
+                     'settings': {'enabled': True}, 'reason': 'Explicit prediction route.'}
+        self.sdk = Mock()
+        self.sdk.complete.return_value = SimpleNamespace(text='{"suggestion":null}', provider='openai-codex',
+            model='fixture-small', usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2))
+        self.context = SimpleNamespace(plugin_id='neo-next-prompt', llm=self.sdk, register_auxiliary_task=Mock())
+        self.snapshot = {'history': [], 'model': 'fixture-main', 'reasoning_config': {'effort': 'max'}}
 
-    def test_uses_selected_low_cost_route_without_mutating_primary_session_or_using_tools(self):
-        from agent import auxiliary_client as aux
-        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"suggestion":"运行回归测试"}', tool_calls=None))])
-        request = SimpleNamespace(client=SimpleNamespace(max_retries=0, base_url='https://chatgpt.com/backend-api/codex'), kwargs={'model': 'selected-small'}, request_provider='openai-codex', resolved_api_mode='chat_completions', base_info='https://chatgpt.com/backend-api/codex', resolved_base_url='https://chatgpt.com/backend-api/codex')
-        snapshot = {'model': 'model-x', 'provider': 'openai-codex', 'reasoning_config': {'enabled': True, 'effort': 'high'}, 'history': [{'role': 'user', 'content': '修复然后测试'}]}
-        with patch('hermes_cli.config.load_config_readonly', return_value={'model': {'provider': 'openai-codex'}}), patch.object(aux, '_plan_aux_call', autospec=True, return_value=(request, {}, {})) as prepare, patch.object(aux, '_relay_sync_completion', autospec=True, return_value=response) as transport, patch.object(aux, 'call_llm', side_effect=AssertionError('recovery ladder forbidden')):
-            self.assertEqual(complete(snapshot), '{"suggestion":"运行回归测试"}')
-            self.assertEqual(prepare.call_args.kwargs['model'], 'selected-small')
-            self.assertEqual(prepare.call_args.kwargs['reasoning_config'], {'enabled': True, 'effort': 'low'})
-            self.assertEqual(snapshot['model'], 'model-x')
-            self.assertEqual(snapshot['reasoning_config']['effort'], 'high')
-            self.assertIsNone(prepare.call_args.kwargs['tools'])
-            self.assertEqual(transport.call_count, 1)
-            transport.side_effect = RuntimeError('fixture failure')
-            with self.assertRaises(RuntimeError): complete(snapshot)
-            self.assertEqual(transport.call_count, 2)
+    def invoke(self, **changes):
+        args = dict(context=self.context, owner_home=self.home, expected_plan=self.plan, current_plan=lambda: self.plan)
+        args.update(changes)
+        return complete(self.snapshot, **args)
 
-    def test_changed_destination_or_sdk_retry_fails_before_transport(self):
-        from agent import auxiliary_client as aux
-        for change in ['provider', 'model', 'endpoint', 'retries']:
-            client = SimpleNamespace(max_retries=0, base_url='https://chatgpt.com/backend-api/codex')
-            request = SimpleNamespace(client=client, kwargs={'model': 'selected-small'}, request_provider='openai-codex', base_info=client.base_url, resolved_base_url=client.base_url, resolved_api_mode='chat_completions')
-            if change == 'provider': request.request_provider = 'unapproved'
-            if change == 'model': request.kwargs['model'] = 'other'
-            if change == 'endpoint': client.base_url = request.base_info = 'https://unapproved.invalid'
-            if change == 'retries': client.max_retries = 2
-            with self.subTest(change=change), patch('hermes_cli.config.load_config_readonly', return_value={'model': {}}), patch.object(aux, '_plan_aux_call', return_value=(request, {}, {})), patch.object(aux, '_relay_sync_completion') as transport:
-                with self.assertRaises(ValueError): complete({'history': []})
-                transport.assert_not_called()
+    def test_uses_selected_low_cost_task_without_mutating_primary_session_or_using_tools(self):
+        before = json.dumps(self.snapshot, sort_keys=True)
+        self.assertEqual(self.invoke(), '{"suggestion":null}')
+        self.assertEqual(before, json.dumps(self.snapshot, sort_keys=True))
+        defaults = self.context.register_auxiliary_task.call_args.kwargs['defaults']
+        self.assertEqual(defaults['model'], 'fixture-small')
+        self.assertEqual(defaults['reasoning_effort'], 'low')
+        request = self.sdk.complete.call_args.kwargs
+        self.assertEqual(request['task'], 'neo_next_prompt')
+        for key in ('tools', 'provider', 'model', 'profile', 'api_key', 'base_url'):
+            self.assertNotIn(key, request)
 
-    def test_no_credit_or_stream_fallback_wrapper_is_used(self):
-        from agent import auxiliary_client as aux
-        create = Mock(side_effect=RuntimeError('402 fixture affordable tokens: 10'))
-        client = SimpleNamespace(max_retries=0, base_url='https://chatgpt.com/backend-api/codex', chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-        request = SimpleNamespace(client=client, kwargs={'model': 'selected-small', 'messages': []}, request_provider='openai-codex', base_info=client.base_url, resolved_base_url=client.base_url, resolved_api_mode='chat_completions')
-        with patch('hermes_cli.config.load_config_readonly', return_value={'model': {}}), patch.object(aux, '_plan_aux_call', return_value=(request, {}, {})), patch.object(aux, '_create_with_progress', side_effect=AssertionError('retrying wrapper forbidden')):
-            with self.assertRaises(RuntimeError): complete({'history': []})
-        self.assertEqual(create.call_count, 1)
+    def test_missing_or_foreign_sdk_capability_fails_before_transport(self):
+        for context in (None, SimpleNamespace(plugin_id='foreign'),
+                        SimpleNamespace(plugin_id='neo-next-prompt', llm=None),
+                        SimpleNamespace(plugin_id='neo-next-prompt', llm=self.sdk, register_auxiliary_task=None)):
+            with self.subTest(context=context), self.assertRaises(RuntimeError):
+                self.invoke(context=context)
+        self.sdk.complete.assert_not_called()
 
-    def test_stale_bound_plan_is_rejected_before_planning(self):
-        from agent import auxiliary_client as aux
-        from .llm_once import prediction_plan
-        old = prediction_plan()
-        old = {**old, 'route': {**old['route'], 'model': 'previous'}}
-        with patch('hermes_cli.config.load_config_readonly', return_value={}), patch.object(aux, '_plan_aux_call') as prepare:
-            with self.assertRaises(ValueError): complete({'history': []}, expected_plan=old)
-            prepare.assert_not_called()
+    def test_sdk_failure_propagates_without_plugin_owned_retry(self):
+        self.sdk.complete.side_effect = RuntimeError('fixture SDK failure')
+        with self.assertRaisesRegex(RuntimeError, 'fixture SDK failure'):
+            self.invoke()
+        self.sdk.complete.assert_called_once()
 
-    def test_unvalidated_custom_endpoint_fails_before_planning(self):
-        from agent import auxiliary_client as aux
-        request = SimpleNamespace(client=object(), kwargs={'model': 'model-x'}, request_provider='provider-x', resolved_api_mode='chat_completions')
-        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"suggestion":null}', tool_calls=None))])
-        with patch('hermes_cli.config.load_config_readonly', return_value={'model': {'provider': 'provider-x', 'base_url': 'https://unvalidated.example.invalid/v1'}}), patch.object(aux, '_plan_aux_call', autospec=True, return_value=(request, {}, {})) as prepare, patch.object(aux, '_relay_sync_completion', autospec=True, return_value=response):
-            with self.assertRaises(ValueError):
-                complete({'model': 'model-x', 'provider': 'provider-x', 'history': [], 'reasoning_config': None})
-            prepare.assert_not_called()
+    def test_host_managed_fallback_result_is_allowed_and_attributed(self):
+        self.sdk.complete.return_value.provider = 'fixture-host-fallback'
+        self.sdk.complete.return_value.model = 'fixture-fallback-model'
+        metrics = {}
+        self.invoke(metrics=metrics)
+        self.assertEqual(metrics['provider'], 'fixture-host-fallback')
+        self.assertEqual(metrics['model'], 'fixture-fallback-model')
+        self.assertEqual(metrics['reasoning']['requested_effort'], 'low')
 
-    def test_unavailable_prediction_route_fails_before_any_transport(self):
-        from agent import auxiliary_client as aux
-        with patch('package.llm_once.prediction_plan', return_value={'route': None, 'reason': 'unavailable'}), patch.object(aux, '_plan_aux_call') as prepare:
-            with self.assertRaises(ValueError):
-                complete({'model': 'model-x', 'provider': 'provider-x'})
-            prepare.assert_not_called()
+    def test_stale_bound_plan_is_rejected_before_sdk(self):
+        other = {**self.plan, 'route': {**self.plan['route'], 'model': 'changed'}}
+        with self.assertRaises(ValueError):
+            self.invoke(current_plan=lambda: other)
+        self.sdk.complete.assert_not_called()
 
+    def test_unavailable_prediction_route_fails_before_sdk(self):
+        empty = {**self.plan, 'route': None, 'reason': 'unavailable'}
+        with self.assertRaises(ValueError):
+            self.invoke(expected_plan=empty, current_plan=lambda: empty)
+        self.sdk.complete.assert_not_called()
 
+    def test_foreign_owner_fails_before_any_sdk_access(self):
+        with self.assertRaises(PermissionError):
+            self.invoke(owner_home=self.home / 'foreign')
+        self.context.register_auxiliary_task.assert_not_called()
+        self.sdk.complete.assert_not_called()
 
-    def test_runtime_registry_pin_drift_is_rejected_before_planning(self):
-        import hashlib
-        from pathlib import Path
-        from agent import auxiliary_client as aux
-        from . import llm_once
-        metadata={'auxiliary_client_sha256':hashlib.sha256(Path(aux.__file__).read_bytes()).hexdigest(),'pins':{'tui_gateway/server.py':'0'*64}}
-        with patch.object(llm_once.json,'loads',return_value=metadata),patch('hermes_cli.config.load_config_readonly',return_value={'model':{'provider':'openai-codex'}}),patch.object(aux,'_plan_aux_call',side_effect=AssertionError('planning reached despite runtime drift')) as plan:
-            with self.assertRaisesRegex(RuntimeError,'host.*changed'):
-                complete({'model':'model-x','provider':'openai-codex','history':[],'reasoning_config':None})
-            plan.assert_not_called()
+    def test_route_change_during_task_preparation_prevents_dispatch(self):
+        other = {**self.plan, 'route': {**self.plan['route'], 'account_scope': 'different-owner'}}
+        with self.assertRaises(ValueError):
+            self.invoke(current_plan=Mock(side_effect=[self.plan, other]))
+        self.sdk.complete.assert_not_called()
 
-    def test_real_relay_executes_the_actual_create_callback_once(self):
-        from agent import auxiliary_client as aux
-        response=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"suggestion":null}',tool_calls=None))])
-        create=Mock(return_value=response)
-        client=SimpleNamespace(max_retries=0, base_url='https://chatgpt.com/backend-api/codex', chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-        request=SimpleNamespace(client=client,kwargs={'model':'selected-small','messages':[{'role':'user','content':'test'}]},request_provider='openai-codex',resolved_api_mode='chat_completions',base_info='https://chatgpt.com/backend-api/codex',resolved_base_url='https://chatgpt.com/backend-api/codex')
-        with patch('hermes_cli.config.load_config_readonly',return_value={'model':{'provider':'openai-codex'}}),patch.object(aux,'_plan_aux_call',autospec=True,return_value=(request,{},{})),patch.object(aux,'call_llm',side_effect=AssertionError('fallback forbidden')):
-            self.assertEqual(complete({'model':'model-x','provider':'openai-codex','history':[],'reasoning_config':None}),'{"suggestion":null}')
-        self.assertEqual(create.call_count,1)
-        self.assertNotIn('tools',create.call_args.kwargs)
+    def test_unknown_host_source_hashes_are_not_a_public_sdk_requirement(self):
+        with patch.object(Path, 'read_bytes', side_effect=AssertionError('source pin read forbidden')):
+            self.assertEqual(self.invoke(), '{"suggestion":null}')
+
 
 if __name__ == '__main__':
     unittest.main()

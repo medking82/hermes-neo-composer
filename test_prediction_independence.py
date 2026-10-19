@@ -1,58 +1,42 @@
-"""Prediction must not inherit or be vetoed by an unrelated main-provider endpoint."""
+"""Main-session routing is not rewritten by a prediction's host-owned task."""
 import copy
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from .llm_once import complete
 
 
 class PredictionIndependenceTests(unittest.TestCase):
-    def test_other_known_main_provider_endpoint_does_not_block_explicit_prediction(self):
-        from agent import auxiliary_client as aux
-        config = {'model': {'provider': 'anthropic', 'default': 'main-only-model',
-                            'base_url': 'https://unrelated-main.invalid/v1'}}
+    def test_other_main_provider_config_is_neither_forwarded_nor_modified(self):
+        config = {'model': {'provider': 'anthropic', 'default': 'fixture-main',
+                           'base_url': 'https://unrelated-main.invalid/v1', 'reasoning_effort': 'max'}}
         original = copy.deepcopy(config)
-        plan = {'route': {'provider': 'openai-codex', 'model': 'selected-small'},
-                'reason': 'Explicit prediction model.', 'settings': {}}
-        endpoint = 'https://chatgpt.com/backend-api/codex'
-        request = SimpleNamespace(client=SimpleNamespace(max_retries=0, base_url=endpoint),
-                                  kwargs={'model': 'selected-small'}, request_provider='openai-codex',
-                                  resolved_api_mode='chat_completions', base_info=endpoint,
-                                  resolved_base_url=endpoint)
-        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-            content='{"suggestion":"Explain one test example"}', tool_calls=None))])
-        with patch('hermes_cli.config.load_config_readonly', return_value=config), \
-             patch('package.llm_once.prediction_plan', return_value=plan), \
-             patch.object(aux, '_plan_aux_call', return_value=(request, {}, {})) as prepare, \
-             patch.object(aux, '_relay_sync_completion', return_value=response) as send:
-            self.assertEqual(complete({'history': []}), '{"suggestion":"Explain one test example"}')
+        sdk = Mock()
+        sdk.complete.return_value = SimpleNamespace(text='{"suggestion":null}')
+        ctx = SimpleNamespace(plugin_id='neo-next-prompt', llm=sdk, register_auxiliary_task=Mock())
+        plan = {'route': {'provider': 'openai-codex', 'model': 'fixture-small'}, 'settings': {}}
+        with (
+            TemporaryDirectory() as temp,
+            patch('hermes_constants.get_hermes_home', return_value=Path(temp)),
+            patch('hermes_cli.config.load_config_readonly', return_value=config),
+        ):
+            complete({'history': []}, context=ctx, owner_home=Path(temp), expected_plan=plan, current_plan=lambda: plan)
         self.assertEqual(config, original)
-        self.assertEqual(prepare.call_args.kwargs['provider'], 'openai-codex')
-        self.assertIsNone(prepare.call_args.kwargs['base_url'])
-        self.assertIsNone(prepare.call_args.kwargs['api_key'])
-        self.assertIsNone(prepare.call_args.kwargs['main_runtime'])
-        send.assert_called_once()
+        self.assertEqual(ctx.register_auxiliary_task.call_args.kwargs['defaults']['provider'], 'openai-codex')
+        for key in ('provider', 'model', 'base_url', 'api_key', 'profile', 'agent_id'):
+            self.assertNotIn(key, sdk.complete.call_args.kwargs)
 
-
-    def test_same_or_ambiguous_main_endpoint_still_fails_closed(self):
-        from agent import auxiliary_client as aux
-        cases = [('openai-codex', 'openai-codex'), ('openai', 'openai-api'),
-                 ('openai-api', 'openai'), ('google', 'gemini'), ('gemini', 'google'),
-                 ('', 'openai-codex'), ('auto', 'openai-codex'), ('custom', 'openai-codex'),
-                 ('unknown-provider', 'openai-codex')]
-        for main, prediction in cases:
-            plan = {'route': {'provider': prediction, 'model': 'selected-small'},
-                    'reason': 'Explicit prediction model.', 'settings': {}}
-            with self.subTest(main=main, prediction=prediction), \
-                 patch('hermes_cli.config.load_config_readonly', return_value={
-                     'model': {'provider': main, 'base_url': 'https://custom.invalid/v1'}}), \
-                 patch('package.llm_once.prediction_plan', return_value=plan), \
-                 patch.object(aux, '_plan_aux_call') as prepare, \
-                 patch.object(aux, '_relay_sync_completion') as send:
-                with self.assertRaisesRegex(ValueError, 'custom endpoint'):
-                    complete({'history': []})
-                prepare.assert_not_called()
-                send.assert_not_called()
+    def test_host_trust_denial_is_not_retried_with_a_private_or_main_model_fallback(self):
+        sdk = Mock()
+        sdk.complete.side_effect = PermissionError('fixture host trust gate denied')
+        ctx = SimpleNamespace(plugin_id='neo-next-prompt', llm=sdk, register_auxiliary_task=Mock())
+        plan = {'route': {'provider': 'openai-codex', 'model': 'fixture-small'}, 'settings': {}}
+        with TemporaryDirectory() as temp, patch('hermes_constants.get_hermes_home', return_value=Path(temp)):
+            with self.assertRaises(PermissionError):
+                complete({'history': []}, context=ctx, owner_home=Path(temp), expected_plan=plan, current_plan=lambda: plan)
+        sdk.complete.assert_called_once()
 
 
 if __name__ == '__main__':

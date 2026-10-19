@@ -7,14 +7,18 @@ from pathlib import Path
 from .service import Service
 
 _owner_home = None
+_context = None
 _service = None
 _scope = uuid.uuid4().hex
 
 
 def register(ctx):
-    global _owner_home
+    global _owner_home, _context, _service, _scope
     from hermes_constants import get_hermes_home
     _owner_home = Path(get_hermes_home()).resolve()
+    _context = ctx
+    _service = None
+    _scope = uuid.uuid4().hex
 
 
 def validate_scope():
@@ -25,11 +29,9 @@ def validate_scope():
 
 
 def _settings_catalog():
-    # Optional private-interface metadata must fail closed, not hide local settings.
+    # Public host inventory is optional; failure must not hide profile settings.
     try:
-        from .llm_once import validate_host
-        validate_host()
-        from .inventory import load_catalog
+        from .sdk_catalog import load_catalog
         return load_catalog()
     except Exception:
         return []
@@ -61,22 +63,30 @@ def update_settings(value, scope):
 
 def get_service():
     global _service
-    from .llm_once import validate_host, prediction_plan, PREDICTION_EFFORT
-    validate_host()
-    from hermes_constants import get_hermes_home
+    from .sdk_llm import validate_context, complete, run_completion, PREDICTION_EFFORT
+    from .sdk_catalog import routing_metadata
+    from .settings import load_settings
+    from .routing import route_identity, select_route
     from hermes_cli.config import load_config_readonly
-    if _owner_home is None or Path(get_hermes_home()).resolve() != _owner_home:
-        raise PermissionError('next-prompt owner scope mismatch')
+    validate_scope()
+    validate_context(_context)
     cfg = load_config_readonly()
-    raw_model = cfg.get('model', {})
-    model = raw_model if isinstance(raw_model, dict) else {'default': raw_model}
-    # Only non-secret routing settings are versioned. No credential copies.
+    def prediction_plan():
+        plugins = load_config_readonly().get('plugins', {})
+        if (not isinstance(plugins, dict) or 'neo-next-prompt' not in plugins.get('enabled', [])
+                or 'neo-next-prompt' in plugins.get('disabled', [])):
+            raise PermissionError('Prediction plugin is no longer enabled in this profile')
+        settings = load_settings(_owner_home)
+        return {**select_route(settings, _settings_catalog() if settings['enabled'] else []), 'settings': settings, 'scope': _scope}
     prompt_digest = hashlib.sha256(Path(__file__).with_name('prediction.txt').read_bytes()).hexdigest()
     plan = prediction_plan()
-    from .routing import route_identity
-    revision = hashlib.sha256(json.dumps([route_identity(plan), prompt_digest, PREDICTION_EFFORT], sort_keys=True).encode()).hexdigest()
+    # A host auxiliary override is operator-owned. Bind it opaquely so changing
+    # its route invalidates cached offers without exporting endpoints or keys.
+    task_config = routing_metadata(cfg.get('auxiliary', {}).get('neo_next_prompt', {})) if isinstance(cfg.get('auxiliary'), dict) else {}
+    revision = hashlib.sha256(json.dumps([route_identity(plan), prompt_digest, PREDICTION_EFFORT, task_config], sort_keys=True).encode()).hexdigest()
     if _service is None or _service.route_revision != revision:
-        from .llm_once import complete
-        _service = Service(_owner_home, lambda snapshot, plan=plan, home=_owner_home: complete(snapshot, expected_plan=plan, owner_home=home), revision)
+        _service = Service(_owner_home, lambda snapshot, plan=plan, home=_owner_home, context=_context: complete(
+            snapshot, context=context, expected_plan=plan, owner_home=home, current_plan=prediction_plan), revision,
+            completion_runner=run_completion)
     _service.prediction_plan = plan
     return _service

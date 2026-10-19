@@ -12,7 +12,10 @@ def _rate(value):
 
 def route_identity(plan):
     route = plan.get('route') or {}
-    return [[route.get(key) for key in ('provider', 'model', 'account_scope')], plan.get('settings', {})]
+    identity = [[route.get(key) for key in ('provider', 'model', 'account_scope')], plan.get('settings', {})]
+    if 'scope' in plan:
+        identity.append(['sdk_scope', plan['scope']])
+    return identity
 
 
 def select_route(settings, catalog):

@@ -5,11 +5,12 @@ from .prompt_core import PromptStore, parse_suggestion, read_snapshot
 
 
 class Service:
-    def __init__(self, home, complete, route_revision, deadline=25):
+    def __init__(self, home, complete, route_revision, deadline=25, *, completion_runner=None):
         self.home = home
         self.complete = complete
         self.route_revision = route_revision
         self.deadline = deadline
+        self.completion_runner = completion_runner
         self.inflight = {}
         self.store = PromptStore(home / 'plugin-data' / 'neo-next-prompt' / 'state.sqlite3')
 
@@ -34,7 +35,9 @@ class Service:
         if not claimed:
             return row
         try:
-            raw = await asyncio.wait_for(asyncio.to_thread(self.complete, snapshot), timeout=self.deadline)
+            operation = (self.completion_runner(self.complete, snapshot) if self.completion_runner
+                         else asyncio.to_thread(self.complete, snapshot))
+            raw = await asyncio.wait_for(operation, timeout=self.deadline)
             fresh = await asyncio.to_thread(self.snapshot, session, stored)
             if fresh is None or fresh['version'] != snapshot['version']:
                 await asyncio.to_thread(self.store.finish, row, 'stale')

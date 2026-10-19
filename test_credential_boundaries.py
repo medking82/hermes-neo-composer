@@ -1,74 +1,57 @@
-"""Final authorized boundary fixes; synthetic credentials, no network."""
+"""Host-SDK credential/billing boundaries; no private token discovery."""
 import json
 import os
-import time
 import unittest
-from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
-from .inventory import billing_kind, load_catalog
+from .inventory import load_catalog
+
 
 class CredentialBoundaries(unittest.TestCase):
-    def catalog(self, provider, env, *, auth=None, fingerprint='owner', external=False, root_oauth=False, inherited=None):
-        with TemporaryDirectory() as directory, ExitStack() as stack:
+    def catalog(self, provider='openai-codex', **changes):
+        with TemporaryDirectory() as directory:
             home = Path(directory)
-            external_dir = home / ('relocated' if external == 'relocated' else '.claude')
-            if external:
-                external_dir.mkdir()
-                (external_dir / '.credentials.json').write_text('{}')
-            if external == 'relocated': env = {**env, 'CLAUDE_CONFIG_DIR': str(external_dir)}
-            root_file = home / 'root-oauth.json'
-            if root_oauth: root_file.write_text('{}')
-            root_auth = home / 'root-auth.json'
-            if inherited: root_auth.write_text(json.dumps(inherited))
-            stack.enter_context(patch('agent.anthropic_credentials._root_hermes_oauth_file', return_value=root_file if root_oauth else None))
-            stack.enter_context(patch('hermes_cli.auth._global_auth_file_path', return_value=root_auth if inherited else None))
-            stack.enter_context(patch('pathlib.Path.home', return_value=home))
-            stack.enter_context(patch('hermes_constants.get_hermes_home', return_value=home))
-            stack.enter_context(patch.dict(os.environ, env, clear=True))
-            stack.enter_context(patch('hermes_cli.config.get_env_value_prefer_dotenv', side_effect=lambda name: env.get(name, '')))
-            stack.enter_context(patch('hermes_cli.config.load_config_readonly', return_value={}))
-            stack.enter_context(patch('hermes_cli.models._load_provider_models_cache', return_value={provider:{'fp':'owner','at':time.time(),'models':['small']}}))
-            stack.enter_context(patch('hermes_cli.models._credential_fingerprint', side_effect=fingerprint if callable(fingerprint) else None, return_value=fingerprint if not callable(fingerprint) else None))
-            stack.enter_context(patch('hermes_cli.auth._load_auth_store', return_value=auth or {}))
-            return load_catalog()
+            (home / 'auth.json').write_text('invalid-json-must-not-be-read')
+            metadata = {provider: {'models': {'small': {
+                'modalities': {'input': ['text'], 'output': ['text']},
+                'limit': {'context': 16000, 'output': 2048}, 'cost': {'input': 1, 'output': 1}}}}}
+            (home / 'models_dev_cache.json').write_text(json.dumps(metadata))
+            row = {'slug': provider, 'authenticated': True, 'models': ['small'], 'source': 'hermes'}
+            row.update(changes)
+            with (
+                patch('hermes_constants.get_hermes_home', return_value=home),
+                patch('hermes_cli.config.load_config_readonly', return_value={}),
+                patch('hermes_cli.inventory.build_models_payload', return_value={'providers': [row]}),
+            ):
+                return load_catalog()
 
-    def test_positive_api_controls_and_unbound_borrowed_sources(self):
-        for provider, env in [('anthropic', {'ANTHROPIC_API_KEY':'sk-ant-api-synthetic'}), ('anthropic', {'ANTHROPIC_TOKEN':'sk-ant-api-synthetic'}), ('openai', {'OPENAI_API_KEY':'synthetic'}), ('google', {'GEMINI_API_KEY':'synthetic'})]:
-            self.assertEqual(self.catalog(provider,env)[0]['billing'],'usd')
-        env={'ANTHROPIC_API_KEY':'sk-ant-api-synthetic'}
-        self.assertEqual(self.catalog('anthropic',env,root_oauth=True),[])
-        self.assertEqual(self.catalog('anthropic',env,external='relocated'),[])
-        self.assertEqual(self.catalog('anthropic',env,inherited={'credential_pool':{'anthropic':[{'source':'hermes_pkce'}]}}),[])
-        self.assertEqual(self.catalog('anthropic',{},external=True),[])
+    def test_positive_host_authenticated_inventory_is_selectable(self):
+        self.assertEqual(self.catalog()[0]['model'], 'small')
 
-    def test_oauth_and_unknown_anthropic_key_formats_cannot_auto_rank(self):
-        for token in ['eyJsynthetic', 'cc-synthetic', 'sk-ant-oat-synthetic', 'unknown']:
-            self.assertEqual(billing_kind('anthropic',token,False),'unknown')
-        self.assertEqual(billing_kind('anthropic','sk-ant-api-synthetic',False),'usd')
+    def test_absent_host_billing_provenance_is_unknown_even_with_api_price_metadata(self):
+        for provider in ('anthropic', 'openai', 'google', 'openai-codex'):
+            with self.subTest(provider=provider):
+                row = self.catalog(provider)[0]
+                self.assertEqual(row['billing'], 'unknown')
+                self.assertFalse(row['priced'])
 
-    def test_secondary_env_and_external_oauth_are_not_dollar_billed(self):
-        env={'ANTHROPIC_API_KEY':'sk-ant-api-synthetic','CLAUDE_CODE_OAUTH_TOKEN':'eyJsynthetic'}
-        self.assertEqual(self.catalog('anthropic',env)[0]['billing'],'unknown')
-        del env['CLAUDE_CODE_OAUTH_TOKEN']
-        self.assertEqual(self.catalog('anthropic',env,external=True)[0]['billing'],'unknown')
+    def test_environment_key_presence_cannot_certify_or_change_host_billing(self):
+        with patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'fixture-key-not-a-credential'}):
+            self.assertEqual(self.catalog('anthropic')[0]['billing'], 'unknown')
 
-    def test_canonical_pool_alias_counts_as_other_credential(self):
-        rows=self.catalog('openai',{'OPENAI_API_KEY':'synthetic'},auth={'credential_pool':{'openai-api':[{}]}})
-        self.assertEqual(rows[0]['billing'],'unknown')
-        rows=self.catalog('google',{'GEMINI_API_KEY':'synthetic'},auth={'providers':{'gemini':{'account':'synthetic'}}})
-        self.assertEqual(rows[0]['billing'],'unknown')
+    def test_only_explicit_host_usd_billing_provenance_allows_usd_estimate(self):
+        row = self.catalog('anthropic', billing='usd')[0]
+        self.assertEqual(row['billing'], 'usd')
+        self.assertTrue(row['priced'])
 
-    def test_legacy_alias_fingerprint_cannot_certify_the_account(self):
-        for provider,key,canonical in [('openai','OPENAI_API_KEY','openai-api'),('google','GEMINI_API_KEY','gemini')]:
-            def fp(name): return 'new-account' if name==canonical else 'owner'
-            self.assertEqual(self.catalog(provider,{key:'synthetic'},fingerprint=fp),[])
+    def test_host_unavailable_auth_and_unbound_catalog_sources_stay_closed(self):
+        for changes in ({'authenticated': False}, {'authenticated': None},
+                        {'source': 'canonical'}, {'source': 'configured-current'},
+                        {'native_catalog_empty': True}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.catalog(**changes), [])
 
-    def test_pinned_host_canonical_fingerprint_changes_with_key(self):
-        from hermes_cli.models import _credential_fingerprint
-        with TemporaryDirectory() as d, patch('hermes_constants.get_hermes_home',return_value=Path(d)):
-            for provider,var in [('openai-api','OPENAI_API_KEY'),('gemini','GEMINI_API_KEY')]:
-                with patch.dict(os.environ,{var:'synthetic-a'}): a=_credential_fingerprint(provider)
-                with patch.dict(os.environ,{var:'synthetic-b'}): b=_credential_fingerprint(provider)
-                self.assertNotEqual(a,b)
+    def test_provider_aliases_are_normalized_without_touching_credentials(self):
+        self.assertEqual(self.catalog('openai-api')[0]['provider'], 'openai')
+        self.assertEqual(self.catalog('gemini')[0]['provider'], 'google')
