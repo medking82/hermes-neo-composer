@@ -60,7 +60,7 @@ def load_catalog():
     payload = build_models_payload(
         context, explicit_only=True, include_unconfigured=False, refresh=False,
         probe_custom_providers=False, probe_current_custom_provider=False,
-        non_blocking_catalogs=True,
+        non_blocking_catalogs=True, picker_hints=True,
     )
     if not isinstance(payload, dict) or not isinstance(payload.get('providers'), list):
         raise RuntimeError('Host model inventory contract is unavailable')
