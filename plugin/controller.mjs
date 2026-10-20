@@ -41,9 +41,9 @@ export function createController(env,storage) {
   // Backend re-asks a cached empty result only after 600s; arm the retry a
   // little past that gate so one request lands in the re-ask window.
   const EMPTY_RETRY_MS=610000
-  let disposed=false,expired=false,started=false,settledSeen=false,inFlight=false,catchUpPending=false,row=null,state={enabled:false,empty:false},retryTimer=null
+  let disposed=false,expired=false,started=false,settledSeen=false,inFlight=false,catchUpPending=false,row=null,state={enabled:false,empty:false},retryTimer=null,phase='idle'
   const visible=()=>!disposed&&!expired&&!c.busy&&state.enabled&&state.empty&&validRow(row) ? row.text : null
-  const publish=()=>env.publish(visible())
+  const publish=()=>env.publish(visible(),phase)
   const decision=(candidate,status)=>({root:candidate.root,version:candidate.version,request_id:candidate.request_id,status})
   const acknowledge=d=>{void env.request('/decision',d).catch(()=>{})}
   const consumeLate=candidate=>{
@@ -65,12 +65,15 @@ export function createController(env,storage) {
   }
   const start=()=>{
     if(disposed||expired||started||inFlight||c.busy||!state.enabled||!state.empty||!c.sessionId||!c.storedId) return
-    started=true;inFlight=true
-    const timer=setTimeout(()=>{timers.delete(timer);expired=true;row=null;publish()},30000)
+    started=true;inFlight=true;phase='generating';publish()
+    const timer=setTimeout(()=>{timers.delete(timer);expired=true;row=null;phase='timeout';publish()},30000)
     timers.add(timer)
     void env.request('/suggestion',{session_id:c.sessionId,stored_id:c.storedId}).then(result=>{
       clearTimeout(timer);timers.delete(timer)
-      if(result.session_id!==c.sessionId||result.stored_id!==c.storedId) return
+      if(result.session_id!==c.sessionId||result.stored_id!==c.storedId) {
+        if(!disposed&&!expired){phase='stale';publish()}
+        return
+      }
       if(expired){consumeLate(result.candidate);return}
       if(disposed) return
       const candidate=result.candidate
@@ -80,18 +83,27 @@ export function createController(env,storage) {
         const settled=ledger(storage)[key]
         const decided=candidate && typeof candidate==='object'
           && settled?.version===candidate.version && settled.request_id===candidate.request_id
-        if(decided) return
+        const bound=candidate && !Array.isArray(candidate) && candidate.root===c.storedId
+          && /^[a-f0-9]{64}$/.test(candidate.version) && /^[a-f0-9]{32}$/.test(candidate.request_id)
+        const returnedPhase=candidate==null?'empty':candidate.root!==c.storedId?'stale':!bound?'failed':
+          ({__proto__:null,empty:'empty',error:'failed',timeout:'timeout',pending:'pending',stale:'stale',consumed:'consumed',dismissed:'dismissed'}[candidate.status]||'failed')
+        if(decided){phase=bound&&['consumed','dismissed','timeout'].includes(settled.status)?settled.status:returnedPhase;publish();return}
+        phase=returnedPhase;publish()
         armRetry()
         return
       }
       const handled=ledger(storage)[key]
       if(handled?.version===candidate.version && handled.request_id===candidate.request_id) {
         if(['consumed','dismissed'].includes(handled.status)) acknowledge(handled)
+        phase=['consumed','dismissed','timeout'].includes(handled.status)?handled.status:'empty';publish()
         return
       }
       cancelRetry()
-      row=candidate;publish()
-    }).catch(()=>{clearTimeout(timer);timers.delete(timer)}).finally(()=>{
+      row=candidate;phase='ready';publish()
+    }).catch(()=>{
+      clearTimeout(timer);timers.delete(timer)
+      if(!disposed&&!expired){phase='failed';publish()}
+    }).finally(()=>{
       inFlight=false
       if(catchUpPending&&!row&&!expired&&!disposed){catchUpPending=false;started=false;start()}
     })
@@ -121,7 +133,7 @@ export function createController(env,storage) {
             session_id:c.sessionId,stored_id:c.storedId,version:candidate.version,request_id:candidate.request_id
           })
           if(result?.current===true) return true
-          if(row===candidate) {expired=true;row=null;cancelRetry();publish()}
+          if(row===candidate) {expired=true;row=null;phase='stale';cancelRetry();publish()}
           return false
         },
         commit(){
@@ -134,6 +146,7 @@ export function createController(env,storage) {
             remember(storage,key,d)
             committed=true
             if(row===candidate) row=null
+            phase='consumed'
             if(!disposed) publish()
             acknowledge(d)
             return true
@@ -146,7 +159,7 @@ export function createController(env,storage) {
       if(!text||!['consumed','dismissed'].includes(status)) return null
       const d=decision(row,status)
       try {remember(storage,key,d)} catch {return null}
-      row=null;publish();acknowledge(d)
+      row=null;phase=status;publish();acknowledge(d)
       return text
     },
     dispose(){disposed=true;off();for(const timer of timers)clearTimeout(timer);timers.clear();row=null;env.publish(null)}

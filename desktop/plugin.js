@@ -44,9 +44,9 @@ function createController(env,storage) {
   // Backend re-asks a cached empty result only after 600s; arm the retry a
   // little past that gate so one request lands in the re-ask window.
   const EMPTY_RETRY_MS=610000
-  let disposed=false,expired=false,started=false,settledSeen=false,inFlight=false,catchUpPending=false,row=null,state={enabled:false,empty:false},retryTimer=null
+  let disposed=false,expired=false,started=false,settledSeen=false,inFlight=false,catchUpPending=false,row=null,state={enabled:false,empty:false},retryTimer=null,phase='idle'
   const visible=()=>!disposed&&!expired&&!c.busy&&state.enabled&&state.empty&&validRow(row) ? row.text : null
-  const publish=()=>env.publish(visible())
+  const publish=()=>env.publish(visible(),phase)
   const decision=(candidate,status)=>({root:candidate.root,version:candidate.version,request_id:candidate.request_id,status})
   const acknowledge=d=>{void env.request('/decision',d).catch(()=>{})}
   const consumeLate=candidate=>{
@@ -68,12 +68,15 @@ function createController(env,storage) {
   }
   const start=()=>{
     if(disposed||expired||started||inFlight||c.busy||!state.enabled||!state.empty||!c.sessionId||!c.storedId) return
-    started=true;inFlight=true
-    const timer=setTimeout(()=>{timers.delete(timer);expired=true;row=null;publish()},30000)
+    started=true;inFlight=true;phase='generating';publish()
+    const timer=setTimeout(()=>{timers.delete(timer);expired=true;row=null;phase='timeout';publish()},30000)
     timers.add(timer)
     void env.request('/suggestion',{session_id:c.sessionId,stored_id:c.storedId}).then(result=>{
       clearTimeout(timer);timers.delete(timer)
-      if(result.session_id!==c.sessionId||result.stored_id!==c.storedId) return
+      if(result.session_id!==c.sessionId||result.stored_id!==c.storedId) {
+        if(!disposed&&!expired){phase='stale';publish()}
+        return
+      }
       if(expired){consumeLate(result.candidate);return}
       if(disposed) return
       const candidate=result.candidate
@@ -83,18 +86,27 @@ function createController(env,storage) {
         const settled=ledger(storage)[key]
         const decided=candidate && typeof candidate==='object'
           && settled?.version===candidate.version && settled.request_id===candidate.request_id
-        if(decided) return
+        const bound=candidate && !Array.isArray(candidate) && candidate.root===c.storedId
+          && /^[a-f0-9]{64}$/.test(candidate.version) && /^[a-f0-9]{32}$/.test(candidate.request_id)
+        const returnedPhase=candidate==null?'empty':candidate.root!==c.storedId?'stale':!bound?'failed':
+          ({__proto__:null,empty:'empty',error:'failed',timeout:'timeout',pending:'pending',stale:'stale',consumed:'consumed',dismissed:'dismissed'}[candidate.status]||'failed')
+        if(decided){phase=bound&&['consumed','dismissed','timeout'].includes(settled.status)?settled.status:returnedPhase;publish();return}
+        phase=returnedPhase;publish()
         armRetry()
         return
       }
       const handled=ledger(storage)[key]
       if(handled?.version===candidate.version && handled.request_id===candidate.request_id) {
         if(['consumed','dismissed'].includes(handled.status)) acknowledge(handled)
+        phase=['consumed','dismissed','timeout'].includes(handled.status)?handled.status:'empty';publish()
         return
       }
       cancelRetry()
-      row=candidate;publish()
-    }).catch(()=>{clearTimeout(timer);timers.delete(timer)}).finally(()=>{
+      row=candidate;phase='ready';publish()
+    }).catch(()=>{
+      clearTimeout(timer);timers.delete(timer)
+      if(!disposed&&!expired){phase='failed';publish()}
+    }).finally(()=>{
       inFlight=false
       if(catchUpPending&&!row&&!expired&&!disposed){catchUpPending=false;started=false;start()}
     })
@@ -124,7 +136,7 @@ function createController(env,storage) {
             session_id:c.sessionId,stored_id:c.storedId,version:candidate.version,request_id:candidate.request_id
           })
           if(result?.current===true) return true
-          if(row===candidate) {expired=true;row=null;cancelRetry();publish()}
+          if(row===candidate) {expired=true;row=null;phase='stale';cancelRetry();publish()}
           return false
         },
         commit(){
@@ -137,6 +149,7 @@ function createController(env,storage) {
             remember(storage,key,d)
             committed=true
             if(row===candidate) row=null
+            phase='consumed'
             if(!disposed) publish()
             acknowledge(d)
             return true
@@ -149,7 +162,7 @@ function createController(env,storage) {
       if(!text||!['consumed','dismissed'].includes(status)) return null
       const d=decision(row,status)
       try {remember(storage,key,d)} catch {return null}
-      row=null;publish();acknowledge(d)
+      row=null;phase=status;publish();acknowledge(d)
       return text
     },
     dispose(){disposed=true;off();for(const timer of timers)clearTimeout(timer);timers.clear();row=null;env.publish(null)}
@@ -206,7 +219,7 @@ function createPortableSession({host,ctx,context,createController,onChange}) {
         if(!current()) return
         if(view?.settings?.enabled!==true || !view?.selection?.route) {publish({phase:'paused',text:null});return}
         if(await host.composer.getDraft(context.storedId)!=='' || !current()) {publish({phase:'draft',text:null});return}
-        controller=createController({context,request,publish:text=>publish({phase:text?'ready':'idle',text}),onSettled:listener=>typeof ctx.onEvent==='function'?ctx.onEvent('session.info',event=>{
+        controller=createController({context,request,publish:(text,phase)=>publish({phase:text?'ready':phase||'idle',text}),onSettled:listener=>typeof ctx.onEvent==='function'?ctx.onEvent('session.info',event=>{
           if(current() && event.session_id===context.sessionId && event.payload?.running===false) listener()
         }):()=>{}},ctx.storage)
         controller.update({enabled:true,empty:true})
@@ -247,17 +260,31 @@ function createPortableWidget({host,jsx,useValue,useEffect,useRef,useState,Butto
       if(ref.current!==session)return
       setPending(false);setNotice(result.ok?(result.durable?'Inserted As Draft':'Inserted As Draft; Decision Was Not Saved'):result.reason)
     }
-    const hints={checking:'Checking Prediction Settings…',paused:'Prediction Is Paused. Check Neo Composer Settings.',draft:'Keep The Draft Empty To Request A Suggestion.',idle:'No Suggestion For This Context Yet.',unavailable:'Prediction Backend Is Unavailable.'}
+    const hints={
+      checking:'Checking Prediction Settings…',
+      generating:'Generating Suggestion…',
+      empty:'No Suggestion For This Context.',
+      failed:'Prediction Could Not Be Completed.',
+      timeout:'Prediction Request Timed Out.',
+      pending:'Prediction Status Is Pending. Use Refresh To Check.',
+      stale:'Suggestion Is No Longer Current.',
+      consumed:'Suggestion Already Accepted For This Context.',
+      dismissed:'Suggestion Dismissed For This Context.',
+      paused:'Prediction Is Paused. Check Neo Composer Settings.',
+      draft:'Keep The Draft Empty To Request A Suggestion.',
+      idle:'Ready To Check For A Suggestion.',
+      unavailable:'Prediction Backend Is Unavailable.'
+    }
     return jsx(Popover,{open,onOpenChange:setOpen,children:[
       jsx(PopoverTrigger,{asChild:true,children:jsx(Button,{variant:'ghost',size:'sm','aria-label':'Neo Composer Suggestions',children:'Neo Composer · Suggestions'})}),
       jsx(PopoverContent,{align:'end',style:{width:340,maxWidth:'calc(100vw - 24px)',display:'grid',gap:12},children:[
         jsx('strong',{children:'Neo Composer Suggestions'}),
         jsx('p',{style:{color:'var(--ui-text-secondary)'},children:'SDK Compatibility Mode · Native Shortcuts Are Unchanged'}),
-        jsx('p',{role:'status',style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},children:!context?'Select A Chat Owned By The Active Gateway.':context.busy?'Suggestions Pause While The Chat Is Working.':view.text||hints[view.phase]||hints.idle}),
+        jsx('p',{role:'status','aria-busy':!!context&&!context.busy&&['checking','generating'].includes(view.phase),style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},children:!context?'Select A Chat Owned By The Active Gateway.':context.busy?'Suggestions Pause While The Chat Is Working.':view.text||hints[view.phase]||hints.idle}),
         jsx('div',{style:{display:'flex',flexWrap:'wrap',gap:8},children:[
           jsx(Button,{disabled:!view.text||pending||!context||context.busy,onClick:insert,children:pending?'Inserting…':'Insert As Draft'}),
           jsx(Button,{variant:'outline',disabled:!view.text||pending,onClick:()=>{if(ref.current?.dismiss())setNotice('Dismissed For This Context')},children:'Dismiss'}),
-          jsx(Button,{variant:'ghost',disabled:pending,onClick:()=>setRevision(value=>value+1),children:'Refresh'})
+          jsx(Button,{variant:'ghost',disabled:pending||['checking','generating'].includes(view.phase),onClick:()=>setRevision(value=>value+1),children:'Refresh'})
         ]}),
         jsx('p',{role:'status',style:{color:'var(--ui-text-secondary)'},children:notice})
       ]})

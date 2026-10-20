@@ -49,7 +49,7 @@ export function createPortableSession({host,ctx,context,createController,onChang
         if(!current()) return
         if(view?.settings?.enabled!==true || !view?.selection?.route) {publish({phase:'paused',text:null});return}
         if(await host.composer.getDraft(context.storedId)!=='' || !current()) {publish({phase:'draft',text:null});return}
-        controller=createController({context,request,publish:text=>publish({phase:text?'ready':'idle',text}),onSettled:listener=>typeof ctx.onEvent==='function'?ctx.onEvent('session.info',event=>{
+        controller=createController({context,request,publish:(text,phase)=>publish({phase:text?'ready':phase||'idle',text}),onSettled:listener=>typeof ctx.onEvent==='function'?ctx.onEvent('session.info',event=>{
           if(current() && event.session_id===context.sessionId && event.payload?.running===false) listener()
         }):()=>{}},ctx.storage)
         controller.update({enabled:true,empty:true})
@@ -90,17 +90,31 @@ export function createPortableWidget({host,jsx,useValue,useEffect,useRef,useStat
       if(ref.current!==session)return
       setPending(false);setNotice(result.ok?(result.durable?'Inserted As Draft':'Inserted As Draft; Decision Was Not Saved'):result.reason)
     }
-    const hints={checking:'Checking Prediction Settings…',paused:'Prediction Is Paused. Check Neo Composer Settings.',draft:'Keep The Draft Empty To Request A Suggestion.',idle:'No Suggestion For This Context Yet.',unavailable:'Prediction Backend Is Unavailable.'}
+    const hints={
+      checking:'Checking Prediction Settings…',
+      generating:'Generating Suggestion…',
+      empty:'No Suggestion For This Context.',
+      failed:'Prediction Could Not Be Completed.',
+      timeout:'Prediction Request Timed Out.',
+      pending:'Prediction Status Is Pending. Use Refresh To Check.',
+      stale:'Suggestion Is No Longer Current.',
+      consumed:'Suggestion Already Accepted For This Context.',
+      dismissed:'Suggestion Dismissed For This Context.',
+      paused:'Prediction Is Paused. Check Neo Composer Settings.',
+      draft:'Keep The Draft Empty To Request A Suggestion.',
+      idle:'Ready To Check For A Suggestion.',
+      unavailable:'Prediction Backend Is Unavailable.'
+    }
     return jsx(Popover,{open,onOpenChange:setOpen,children:[
       jsx(PopoverTrigger,{asChild:true,children:jsx(Button,{variant:'ghost',size:'sm','aria-label':'Neo Composer Suggestions',children:'Neo Composer · Suggestions'})}),
       jsx(PopoverContent,{align:'end',style:{width:340,maxWidth:'calc(100vw - 24px)',display:'grid',gap:12},children:[
         jsx('strong',{children:'Neo Composer Suggestions'}),
         jsx('p',{style:{color:'var(--ui-text-secondary)'},children:'SDK Compatibility Mode · Native Shortcuts Are Unchanged'}),
-        jsx('p',{role:'status',style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},children:!context?'Select A Chat Owned By The Active Gateway.':context.busy?'Suggestions Pause While The Chat Is Working.':view.text||hints[view.phase]||hints.idle}),
+        jsx('p',{role:'status','aria-busy':!!context&&!context.busy&&['checking','generating'].includes(view.phase),style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'},children:!context?'Select A Chat Owned By The Active Gateway.':context.busy?'Suggestions Pause While The Chat Is Working.':view.text||hints[view.phase]||hints.idle}),
         jsx('div',{style:{display:'flex',flexWrap:'wrap',gap:8},children:[
           jsx(Button,{disabled:!view.text||pending||!context||context.busy,onClick:insert,children:pending?'Inserting…':'Insert As Draft'}),
           jsx(Button,{variant:'outline',disabled:!view.text||pending,onClick:()=>{if(ref.current?.dismiss())setNotice('Dismissed For This Context')},children:'Dismiss'}),
-          jsx(Button,{variant:'ghost',disabled:pending,onClick:()=>setRevision(value=>value+1),children:'Refresh'})
+          jsx(Button,{variant:'ghost',disabled:pending||['checking','generating'].includes(view.phase),onClick:()=>setRevision(value=>value+1),children:'Refresh'})
         ]}),
         jsx('p',{role:'status',style:{color:'var(--ui-text-secondary)'},children:notice})
       ]})

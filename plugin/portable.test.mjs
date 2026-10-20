@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readPortableContext, samePortableContext, insertPortableOffer, createPortableSession } from './portable.mjs'
+import { readPortableContext, samePortableContext, insertPortableOffer, createPortableSession, createPortableWidget } from './portable.mjs'
 import { createController } from './controller.mjs'
 Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:()=>null}})
 
@@ -13,6 +13,26 @@ function fixture() {
   return {host,ctx,values,inserted,calls,updates,saved,candidate}
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve))
+
+// Presentation projection only; lifecycle behavior uses the real session and
+// controller below. These nodes are not a substitute for real PC UI evidence.
+function renderPortableView(f,view,notice='') {
+  const states=[true,0,view,notice,false],nodes=[]
+  let index=0
+  const Widget=createPortableWidget({host:f.host,jsx:(type,props)=>({type,props}),
+    useValue:()=>{},useEffect:()=>{},useRef:()=>({current:null}),
+    useState:()=>[states[index++],()=>{}],Button:'Button',Popover:'Popover',
+    PopoverTrigger:'PopoverTrigger',PopoverContent:'PopoverContent',createController})
+  const visit=node=>{
+    if(!node || typeof node!=='object')return
+    nodes.push(node)
+    const children=node.props?.children
+    for(const child of Array.isArray(children)?children:[children])visit(child)
+  }
+  visit(Widget({ctx:f.ctx}))
+  assert.equal(index,states.length)
+  return {status:nodes.find(node=>node.props?.role==='status'),button:label=>nodes.find(node=>node.type==='Button'&&node.props.children===label)}
+}
 
 test('portable context binds exact connection, profile, runtime and stored session',()=>{
   const f=fixture(), c=readPortableContext(f.host)
@@ -108,6 +128,7 @@ test('a model or provider route change rejects the cached offer without regenera
     current=false
     assert.equal((await session.insert()).ok,false)
     assert.equal(f.updates.at(-1).text,null)
+    assert.equal(f.updates.at(-1).phase,'stale')
     assert.deepEqual(f.inserted,[])
     assert.equal(f.calls.filter(([path])=>path==='/suggestion').length,1)
     assert.ok(!f.calls.some(([path])=>path==='/decision'))
@@ -146,5 +167,120 @@ test('validation errors, malformed results and owner/draft changes cannot insert
       assert.ok(!f.calls.some(([path])=>path==='/decision'),mode)
       if(mode==='draft')assert.equal(draft,'Preserved User Draft')
     } finally {session.dispose()}
+  }
+})
+
+test('portable session keeps a pending prediction visibly generating until its result settles',async()=>{
+  const f=fixture(), original=f.ctx.rest
+  let finish
+  f.ctx.rest=(path,options)=>{
+    if(path!=='/suggestion')return original(path,options)
+    f.calls.push([path,options])
+    return new Promise(resolve=>{finish=resolve})
+  }
+  const session=createPortableSession({host:f.host,ctx:f.ctx,context:readPortableContext(f.host),createController,onChange:update=>f.updates.push(update)})
+  try {
+    await session.start();await tick()
+    assert.equal(f.updates.at(-1).phase,'generating')
+    assert.equal(f.updates.at(-1).text,null)
+    assert.equal(f.calls.filter(([path])=>path==='/suggestion').length,1)
+    finish({session_id:'runtime',stored_id:'stored',candidate:f.candidate})
+    await tick()
+    assert.deepEqual(f.updates.at(-1),{phase:'ready',text:f.candidate.text})
+  } finally {
+    finish?.({session_id:'runtime',stored_id:'stored',candidate:null})
+    session.dispose()
+    await tick()
+  }
+})
+
+test('portable widget labels the active request and prevents duplicate refresh while waiting',()=>{
+  const view=renderPortableView(fixture(),{phase:'generating',text:null})
+  assert.equal(view.status.props.children,'Generating Suggestion…')
+  assert.equal(view.status.props['aria-busy'],true)
+  assert.equal(view.button('Refresh').props.disabled,true)
+  assert.equal(view.button('Insert As Draft').props.disabled,true)
+})
+
+test('portable session distinguishes settled outcomes without repeating generation or exposing errors',async()=>{
+  const modes={null:'empty',empty:'empty',error:'failed',timeout:'timeout',pending:'pending',stale:'stale',foreign:'stale',spoofed:'failed',mismatch:'stale',transport:'failed',prototype:'failed',constructor:'failed',malformed:'failed'}
+  for(const [mode,phase] of Object.entries(modes)) {
+    const f=fixture(),original=f.ctx.rest
+    f.ctx.rest=async(path,options)=>{
+      if(path!=='/suggestion')return original(path,options)
+      f.calls.push([path,options])
+      if(mode==='transport')throw Error('fixture-private-error-details')
+      const candidate=mode==='null'?null:{...f.candidate,status:mode==='foreign'?'error':mode,text:null}
+      if(mode==='foreign')candidate.root='other-owner'
+      if(mode==='spoofed')Object.assign(candidate,{status:'ready',text:'unsafe\u202etext'})
+      if(mode==='prototype')candidate.status='__proto__'
+      if(mode==='malformed')Object.assign(candidate,{status:'error',request_id:'invalid-receipt'})
+      return {session_id:mode==='mismatch'?'other-runtime':'runtime',stored_id:'stored',candidate}
+    }
+    const session=createPortableSession({host:f.host,ctx:f.ctx,context:readPortableContext(f.host),createController,onChange:update=>f.updates.push(update)})
+    try {
+      await session.start();await tick()
+      assert.deepEqual(f.updates.at(-1),{phase,text:null},mode)
+      assert.equal(f.calls.filter(([path])=>path==='/suggestion').length,1,mode)
+      assert.ok(!JSON.stringify(f.updates).includes('fixture-private-error-details'))
+      assert.deepEqual(f.inserted,[],mode)
+    } finally {session.dispose()}
+  }
+})
+
+test('portable widget distinguishes settled empty, failed, timed out and pending records',()=>{
+  const cases={empty:'No Suggestion For This Context.',failed:'Prediction Could Not Be Completed.',timeout:'Prediction Request Timed Out.',pending:'Prediction Status Is Pending. Use Refresh To Check.',stale:'Suggestion Is No Longer Current.'}
+  for(const [phase,label] of Object.entries(cases)) {
+    const view=renderPortableView(fixture(),{phase,text:null})
+    assert.equal(view.status.props.children,label,phase)
+    assert.equal(view.status.props['aria-busy'],false,phase)
+    assert.equal(view.button('Refresh').props.disabled,false,phase)
+    assert.equal(view.button('Insert As Draft').props.disabled,true,phase)
+  }
+})
+
+test('portable session retains the timed-out status when a late result arrives',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']})
+  const f=fixture(),original=f.ctx.rest
+  let finish
+  f.ctx.rest=(path,options)=>{
+    if(path!=='/suggestion')return original(path,options)
+    f.calls.push([path,options]);return new Promise(resolve=>{finish=resolve})
+  }
+  const session=createPortableSession({host:f.host,ctx:f.ctx,context:readPortableContext(f.host),createController,onChange:update=>f.updates.push(update)})
+  try {
+    await session.start();await tick();t.mock.timers.tick(30001)
+    assert.deepEqual(f.updates.at(-1),{phase:'timeout',text:null})
+    finish({session_id:'runtime',stored_id:'stored',candidate:f.candidate});await tick()
+    assert.deepEqual(f.updates.at(-1),{phase:'timeout',text:null})
+    assert.equal(Object.values(f.saved.get('decisions'))[0].status,'timeout')
+    assert.ok(!f.calls.some(([path])=>path==='/decision'))
+    assert.deepEqual(f.inserted,[])
+  } finally {session.dispose()}
+})
+
+test('portable session distinguishes accepted and dismissed offers from an empty prediction',async()=>{
+  for(const status of ['consumed','dismissed']) {
+    const f=fixture()
+    const session=createPortableSession({host:f.host,ctx:f.ctx,context:readPortableContext(f.host),createController,onChange:update=>f.updates.push(update)})
+    try {
+      await session.start();await tick()
+      if(status==='consumed')assert.deepEqual(await session.insert(),{ok:true,durable:true})
+      else assert.equal(session.dismiss(),true)
+      assert.deepEqual(f.updates.at(-1),{phase:status,text:null},status)
+      assert.equal(Object.values(f.saved.get('decisions'))[0].status,status)
+      assert.equal(f.calls.filter(([path])=>path==='/suggestion').length,1)
+      assert.equal(f.inserted.length,status==='consumed'?1:0)
+    } finally {session.dispose()}
+  }
+})
+
+test('portable widget explains accepted, dismissed and not-yet-started states',()=>{
+  const cases={consumed:'Suggestion Already Accepted For This Context.',dismissed:'Suggestion Dismissed For This Context.',idle:'Ready To Check For A Suggestion.'}
+  for(const [phase,label] of Object.entries(cases)) {
+    const view=renderPortableView(fixture(),{phase,text:null})
+    assert.equal(view.status.props.children,label,phase)
+    assert.equal(view.status.props['aria-busy'],false,phase)
+    assert.equal(view.button('Insert As Draft').props.disabled,true,phase)
   }
 })
