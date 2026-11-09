@@ -1,0 +1,20 @@
+# systemd --user unit for the Neo Suggest service (GA401 / any Linux host with linger).
+# Installed by deploy/install.sh; checkout lives at %h/services/neo-suggest.
+[Unit]
+Description=Neo Suggest ghost-text prediction service (neo-suggest-v1)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/neo-suggest/service
+EnvironmentFile=-%h/.config/neo-suggest/env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -I %h/services/neo-suggest/service/neo_suggest.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

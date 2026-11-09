@@ -1,0 +1,43 @@
+#!/bin/sh
+# Install or update Neo Suggest as a systemd --user service from GitHub.
+#   sh deploy/install.sh            (run as the service user, e.g. marck on GA401)
+# Idempotent: fast-forwards the checkout, keeps ~/.config/neo-suggest/env, restarts, then smoke-tests.
+set -eu
+REPO=${NEO_REPO:-https://github.com/medking82/hermes-neo-composer.git}
+BRANCH=${NEO_BRANCH:-main}
+DIR=$HOME/services/neo-suggest
+CFG=$HOME/.config/neo-suggest
+UNIT_DIR=$HOME/.config/systemd/user
+
+if [ -d "$DIR/.git" ]; then
+  git -C "$DIR" fetch -q origin "$BRANCH"
+  git -C "$DIR" checkout -q "$BRANCH"
+  git -C "$DIR" merge -q --ff-only "origin/$BRANCH"
+else
+  git clone -q --branch "$BRANCH" "$REPO" "$DIR"
+fi
+
+mkdir -p "$CFG" "$UNIT_DIR"
+if [ ! -f "$CFG/env" ]; then
+  cat > "$CFG/env" <<'EOF'
+# Neo Suggest settings (see service/neo_suggest.py). Loopback only; reach it via SSH tunnel.
+NEO_BIND=127.0.0.1:3460
+NEO_UPSTREAM=http://127.0.0.1:3425/v1
+NEO_MODELS=group/hestia
+EOF
+  chmod 600 "$CFG/env"
+fi
+
+install -m 644 "$DIR/deploy/neo-suggest.service" "$UNIT_DIR/neo-suggest.service"
+systemd-analyze --user verify "$UNIT_DIR/neo-suggest.service"
+systemctl --user daemon-reload
+systemctl --user enable -q neo-suggest.service
+systemctl --user restart neo-suggest.service
+
+i=0
+until curl -fsS -m 2 http://127.0.0.1:3460/healthz >/dev/null 2>&1; do
+  i=$((i + 1)); [ "$i" -ge 20 ] && { journalctl --user -u neo-suggest -n 30 --no-pager; exit 1; }
+  sleep 0.5
+done
+echo "installed $(git -C "$DIR" rev-parse --short HEAD)"
+python3 -I "$DIR/compat/smoke.py" --service http://127.0.0.1:3460 ${NEO_SMOKE_LIVE:+--live}
