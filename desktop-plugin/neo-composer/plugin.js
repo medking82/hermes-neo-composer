@@ -37,7 +37,7 @@ export function isEditorEmpty(el) {
 
 export function createController({ fetchImpl, request, storage, now = () => Date.now() }) {
   const listeners = new Set()
-  let state = { sessionId: null, suggestion: null, status: 'idle', error: null }
+  let state = { sessionId: null, suggestion: null, status: 'idle', error: null, filled: false }
   let seq = 0
   const settings = () => ({ ...DEFAULTS, ...(storage?.get('settings', {}) || {}) })
   const set = patch => {
@@ -48,8 +48,8 @@ export function createController({ fetchImpl, request, storage, now = () => Date
   async function refresh(sessionId) {
     const s = settings()
     const my = ++seq
-    if (!s.enabled || !sessionId) return set({ sessionId, suggestion: null, status: 'idle' })
-    set({ sessionId, suggestion: null, status: 'loading', error: null })
+    if (!s.enabled || !sessionId) return set({ sessionId, suggestion: null, status: 'idle', filled: false })
+    set({ sessionId, suggestion: null, status: 'loading', error: null, filled: false })
     try {
       const history = await request('session.history', { session_id: sessionId })
       const messages = toServiceMessages(history)
@@ -76,7 +76,9 @@ export function createController({ fetchImpl, request, storage, now = () => Date
     settings,
     subscribe(fn) { listeners.add(fn); fn(state); return () => listeners.delete(fn) },
     refresh,
-    clear() { seq++; set({ suggestion: null, status: 'idle' }) }
+    clear() { seq++; set({ suggestion: null, status: 'idle', filled: false }) },
+    // Filled into the composer: hide the pill but keep the suggestion, so clearing the draft brings it back.
+    setFilled(filled) { if (state.filled !== !!filled) set({ filled: !!filled }) }
   }
 }
 
@@ -104,8 +106,12 @@ function installInline(ctrl, accept) {
     applying = false
   }
   // React re-renders reset data-placeholder; re-apply after them.
-  const mo = new MutationObserver(() => { if (!applying) paint() })
-  mo.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-placeholder'] })
+  const restore = () => {
+    const eds = visibleEditors()
+    if (ctrl.get().filled && eds.length === 1 && isEditorEmpty(eds[0])) ctrl.setFilled(false)
+  }
+  const mo = new MutationObserver(() => { if (!applying) { paint(); restore() } })
+  mo.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-placeholder', 'data-empty'] })
   const onKey = ev => {
     if (ev.key !== 'Tab' || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing) return
     const el = ev.target?.closest?.(EDITOR_SELECTOR)
@@ -135,7 +141,7 @@ function useCtrl(ctrl) {
 
 function Pill({ ctrl, accept, copy }) {
   const s = useCtrl(ctrl)
-  if (!s.suggestion) return null
+  if (!s.suggestion || s.filled) return null
   const btn = 'rounded px-1.5 py-0.5 text-[0.6875rem] text-(--ui-text-tertiary) hover:bg-(--ui-bg-hover)'
   return jsxs('div', {
     className: 'flex max-w-full items-center gap-1 px-2 py-1 text-xs',
@@ -204,7 +210,7 @@ export default {
       const draft = await host.composer.getDraft(sessionId)
       if (draft === null || draft.trim() || sessionId !== host.state.focusedSessionId.get()) return false
       const ok = await host.composer.setDraft(sessionId, text)
-      if (ok) { ctrl.clear(); host.composer.focus(sessionId) }
+      if (ok) { ctrl.setFilled(true); host.composer.focus(sessionId) }
       return ok
     }
 

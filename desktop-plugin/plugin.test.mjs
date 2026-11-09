@@ -104,6 +104,14 @@ test('register wires underside pill, keybind, palette; busy clears and idle refe
   h.composer.getDraft = async () => ''
   assert.equal(await accept(), true)
   assert.equal(calls.draft.at(-1), '下一步')
+  // Filling hides the pill but keeps the suggestion so an emptied draft brings it back.
+  const ctrl = pill.p.ctrl
+  assert.equal(ctrl.get().suggestion, '下一步')
+  assert.equal(ctrl.get().filled, true)
+  ctrl.setFilled(false)
+  assert.equal(ctrl.get().filled, false)
+  ctrl.clear()
+  assert.equal(ctrl.get().suggestion, null)
   disposer()
 })
 
