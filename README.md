@@ -51,7 +51,7 @@ mkdir -p "$HERMES_HOME/desktop-plugins/neo-composer"
 cp desktop-plugin/neo-composer/plugin.js "$HERMES_HOME/desktop-plugins/neo-composer/"
 ```
 
-Update with `git -C "$LOCALAPPDATA/hermes/services/neo-suggest" pull --ff-only`, then end the `pythonw` process; the launcher restarts it automatically (a duplicate instance cannot grab the port).
+Update with `git -C "$LOCALAPPDATA/hermes/services/neo-suggest" pull --ff-only`, then end the `pythonw` process; the launcher restarts it automatically; after a forced kill Windows can hold the port for a minute or two, so allow ~2 min (a duplicate instance cannot grab the port).
 
 Desktop hot-loads it. Do not bind the service to the LAN without `NEO_TOKEN`: it spends Magpie quota.
 
