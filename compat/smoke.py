@@ -16,10 +16,14 @@ import sys
 import urllib.request
 from pathlib import Path
 
-DEFAULT_SRC = [
-    Path(os.environ.get('LOCALAPPDATA', '')) / 'hermes/hermes-agent',
+# Order matters: the install that actually runs must win over stale dev copies
+# (GA401 runs /opt/hermes while an old ~/.hermes/hermes-agent checkout still exists).
+DEFAULT_SRC = [p for p in (
+    Path(os.environ['HERMES_SRC']) if os.environ.get('HERMES_SRC') else None,
+    Path('/opt/hermes'),
+    Path(os.environ['LOCALAPPDATA']) / 'hermes/hermes-agent' if os.environ.get('LOCALAPPDATA') else None,
     Path.home() / '.hermes/hermes-agent',
-]
+) if p is not None]
 
 # (label, file relative to hermes-agent, regex, required)
 SEAMS = [
