@@ -351,6 +351,12 @@ def make_handler(cfg, predictor):
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second process bind the same port and steal requests;
+    # keep the port exclusive there so a duplicate instance fails fast instead.
+    allow_reuse_address = os.name != 'nt'
+
+
 def log(line):
     """Write a log line to stderr; no-op when there is none (pythonw / no console)."""
     stream = sys.stderr
@@ -366,7 +372,7 @@ def log(line):
 def serve(cfg=None):
     cfg = cfg or load_config()
     predictor = Predictor(cfg)
-    httpd = ThreadingHTTPServer((cfg['host'], cfg['port']), make_handler(cfg, predictor))
+    httpd = _Server((cfg['host'], cfg['port']), make_handler(cfg, predictor))
     httpd.daemon_threads = True
     log(f'neo-suggest {VERSION} on {cfg["host"]}:{cfg["port"]} -> {cfg["upstream"]} {cfg["models"]}')
     try:

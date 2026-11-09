@@ -51,6 +51,12 @@ class LogTests(unittest.TestCase):
             sys.stderr = saved
 
 
+class ServerTests(unittest.TestCase):
+    def test_port_exclusive_on_windows(self):
+        import os
+        self.assertEqual(ns._Server.allow_reuse_address, os.name != 'nt')
+
+
 class ParseTests(unittest.TestCase):
     def test_valid_and_fenced(self):
         self.assertEqual(ns.parse_suggestion('{"suggestion":"幫我裝到 GA401"}'), '幫我裝到 GA401')
