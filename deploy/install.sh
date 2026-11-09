@@ -13,6 +13,8 @@ if [ -d "$DIR/.git" ]; then
   git -C "$DIR" fetch -q origin "$BRANCH"
   git -C "$DIR" checkout -q "$BRANCH"
   git -C "$DIR" merge -q --ff-only "origin/$BRANCH"
+  # sh may have read an older copy of this script; continue with the pulled one.
+  if [ -z "${NEO_REEXEC:-}" ]; then NEO_REEXEC=1 NEO_BRANCH="$BRANCH" exec sh "$DIR/deploy/install.sh"; fi
 else
   git clone -q --branch "$BRANCH" "$REPO" "$DIR"
 fi
