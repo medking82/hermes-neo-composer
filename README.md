@@ -41,12 +41,17 @@ curl -fsSL https://raw.githubusercontent.com/medking82/hermes-neo-composer/main/
 
 It clones/fast-forwards `~/services/neo-suggest`, writes `~/.config/neo-suggest/env` once (loopback `127.0.0.1:3460`, upstream `127.0.0.1:3425/v1`, model `group/hestia`), installs the `neo-suggest` user unit plus an hourly `neo-suggest-compat.timer` (offline smoke check, no model call — `systemctl --user status neo-suggest-compat` shows FAIL after a breaking Hermes update), restarts and runs the smoke test. Re-run it to update.
 
-**PC:** the service stays on GA401; forward it with SSH (`-L 127.0.0.1:3460:127.0.0.1:3460 ga401`) and copy the plugin:
+**Windows PC:** every host runs its own service against its own local Magpie (no tunnel, no dependency on another machine). Clone a separate runtime checkout, start it hidden at login, and copy the plugin:
 
 ```sh
+git clone -q --branch v0.5-durable https://github.com/medking82/hermes-neo-composer.git "$LOCALAPPDATA/hermes/services/neo-suggest"
+# Startup folder launcher -> deploy/neo-suggest-windows.vbs (single instance, restarts on exit,
+# uses %LOCALAPPDATA%\Python\bin\pythonw.exe, falls back to pyw.exe)
 mkdir -p "$HERMES_HOME/desktop-plugins/neo-composer"
 cp desktop-plugin/neo-composer/plugin.js "$HERMES_HOME/desktop-plugins/neo-composer/"
 ```
+
+Update with `git -C "$LOCALAPPDATA/hermes/services/neo-suggest" pull --ff-only`, then end the `pythonw` process; the launcher restarts it within 10 s.
 
 Desktop hot-loads it. Do not bind the service to the LAN without `NEO_TOKEN`: it spends Magpie quota.
 
