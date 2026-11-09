@@ -29,8 +29,11 @@ EOF
 fi
 
 install -m 644 "$DIR/deploy/neo-suggest.service" "$UNIT_DIR/neo-suggest.service"
-systemd-analyze --user verify "$UNIT_DIR/neo-suggest.service"
+install -m 644 "$DIR/deploy/neo-suggest-compat.service" "$UNIT_DIR/neo-suggest-compat.service"
+install -m 644 "$DIR/deploy/neo-suggest-compat.timer" "$UNIT_DIR/neo-suggest-compat.timer"
+systemd-analyze --user verify "$UNIT_DIR/neo-suggest.service" "$UNIT_DIR/neo-suggest-compat.service" "$UNIT_DIR/neo-suggest-compat.timer"
 systemctl --user daemon-reload
+systemctl --user enable --now -q neo-suggest-compat.timer
 systemctl --user enable -q neo-suggest.service
 systemctl --user restart neo-suggest.service
 

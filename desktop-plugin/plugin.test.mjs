@@ -78,7 +78,8 @@ test('service errors surface as status=error, not throw', async () => {
 
 test('register wires underside pill, keybind, palette; busy clears and idle refetches', async () => {
   const regs = []; let disposer
-  const ctx = { storage: { get: () => ({}), set() {} }, registerMany: r => regs.push(...r), registerSettingsPage() {}, onDispose: f => { disposer = f } }
+  const copied = []
+  const ctx = { os: { writeClipboard: async text => { copied.push(text); return true } }, storage: { get: () => ({}), set() {} }, registerMany: r => regs.push(...r), registerSettingsPage() {}, onDispose: f => { disposer = f } }
   mod.default.register(ctx)
   assert.deepEqual(regs.map(r => r.area), ['composer.underside', 'keybinds', 'palette'])
   const h = globalThis.__host
@@ -87,6 +88,9 @@ test('register wires underside pill, keybind, palette; busy clears and idle refe
   h.state.busyBySession.set({ s1: false })
   await new Promise(r => setTimeout(r, 10))
   assert.ok(calls.history > before)
+  const pill = regs.find(r => r.area === 'composer.underside').render()
+  assert.equal(await pill.p.copy('下一步'), true)
+  assert.deepEqual(copied, ['下一步'])
   const accept = regs.find(r => r.area === 'keybinds').data.run
   const n = calls.draft.length
   h.composer.getDraft = async () => 'existing user draft'

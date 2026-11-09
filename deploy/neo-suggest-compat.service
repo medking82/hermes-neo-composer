@@ -1,0 +1,9 @@
+[Unit]
+Description=Check Neo Composer compatibility without inference
+After=neo-suggest.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I %h/services/neo-suggest/compat/smoke.py
+NoNewPrivileges=yes
+PrivateTmp=yes

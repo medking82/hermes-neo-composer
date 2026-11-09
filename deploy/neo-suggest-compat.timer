@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically detect Hermes SDK or Neo Suggest contract changes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

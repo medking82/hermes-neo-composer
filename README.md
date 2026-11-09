@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/medking82/hermes-neo-composer/main/
 # or, from an existing checkout:  sh ~/services/neo-suggest/deploy/install.sh
 ```
 
-It clones/fast-forwards `~/services/neo-suggest`, writes `~/.config/neo-suggest/env` once (loopback `127.0.0.1:3460`, upstream `127.0.0.1:3425/v1`, model `group/hestia`), installs the `neo-suggest` user unit, restarts and runs the smoke test. Re-run it to update.
+It clones/fast-forwards `~/services/neo-suggest`, writes `~/.config/neo-suggest/env` once (loopback `127.0.0.1:3460`, upstream `127.0.0.1:3425/v1`, model `group/hestia`), installs the `neo-suggest` user unit plus an hourly `neo-suggest-compat.timer` (offline smoke check, no model call — `systemctl --user status neo-suggest-compat` shows FAIL after a breaking Hermes update), restarts and runs the smoke test. Re-run it to update.
 
 **PC:** the service stays on GA401; forward it with SSH (`-L 127.0.0.1:3460:127.0.0.1:3460 ga401`) and copy the plugin:
 
