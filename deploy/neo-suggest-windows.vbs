@@ -23,7 +23,6 @@ If Not fso.FileExists(py) Then py = "pyw.exe"
 Set env = sh.Environment("PROCESS")
 If env("NEO_BIND") = "" Then env("NEO_BIND") = "127.0.0.1:3460"
 If env("NEO_UPSTREAM") = "" Then env("NEO_UPSTREAM") = "http://127.0.0.1:3425/v1"
-If env("NEO_MODELS") = "" Then env("NEO_MODELS") = "group/hestia"
 
 cmd = """" & py & """ -I """ & root & "\service\neo_suggest.py"""
 Do
