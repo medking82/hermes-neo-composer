@@ -1,8 +1,8 @@
 name: Checks
 on:
   push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -14,10 +14,14 @@ jobs:
         with:
           node-version: '22'
       - name: Service unit tests
-        run: cd service && python3 -m unittest -v test_neo_suggest
+        run: cd service && python3 -B -m unittest discover -s . -v
       - name: Desktop plugin tests
         run: node --check desktop-plugin/neo-composer/plugin.js && node --test desktop-plugin/plugin.test.mjs
       - name: Python syntax
-        run: python3 -m compileall -q service compat
+        run: python3 -B -m compileall -q service compat scripts
       - name: Shell syntax
         run: sh -n deploy/install.sh
+      - name: Offline release entrypoint contracts
+        run: python3 -B -m unittest discover -s tests -v
+      # Full shared qualification is an explicit local WSL step (README).
+      # Its pinned private sibling checkout is not available to this public job.

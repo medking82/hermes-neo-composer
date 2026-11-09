@@ -1,0 +1,18 @@
+{
+  "runnerRepository": "medking82/hermes-fleet-sync",
+  "runnerRevision": "4f79a5b4452d9a91037e4cbf564a927b44e2bac6",
+  "project": "neo",
+  "classShards": 1,
+  "requireHermesSource": false,
+  "manifest": {
+    "scope": "full-offline",
+    "suites": [
+      {"name": "service", "runner": "unittest", "cwd": "service", "argv": ["{python}", "-B", "-m", "unittest", "discover", "-s", ".", "-v"]},
+      {"name": "plugin-syntax", "argv": ["node", "--check", "desktop-plugin/neo-composer/plugin.js"]},
+      {"name": "plugin", "argv": ["node", "--test", "desktop-plugin/plugin.test.mjs"]},
+      {"name": "python-syntax", "argv": ["{python}", "-B", "-m", "compileall", "-q", "service", "compat", "scripts"]},
+      {"name": "shell-syntax", "argv": ["sh", "-n", "deploy/install.sh"]},
+      {"name": "release-adapter", "runner": "unittest", "argv": ["{python}", "-B", "-m", "unittest", "discover", "-s", "tests", "-v"]}
+    ]
+  }
+}

@@ -32,6 +32,8 @@ The last message must be from the assistant. Rows with images, data URLs or loca
 
 ## Deploy
 
+Before publishing, installing, updating the service, or copying the Desktop plugin, run the [offline release qualification command](docs/release-qualification.md) in WSL. It pins the shared runner, measures every unittest class, retains all existing checks, and qualifies committed source only. Installation and remote smoke remain separate steps.
+
 **GA401 (or any Linux host with systemd linger), as the service user:**
 
 ```sh

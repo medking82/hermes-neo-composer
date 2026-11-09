@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "0c78124b881dd414b507b6ff9b8cb02fa5970f9f",
+  "runnerRevision": "4f79a5b4452d9a91037e4cbf564a927b44e2bac6",
+  "note": "Measured serial WSL baseline. Placement hints only; refresh explicitly, never overwrite after qualification.",
+  "suites": [
+    {
+      "name": "service",
+      "classTiming": {
+        "classes": [
+          {
+            "classId": "test_neo_suggest.HttpTests",
+            "seconds": 1.519994
+          },
+          {
+            "classId": "test_neo_suggest.LanguageTests",
+            "seconds": 0.000511
+          },
+          {
+            "classId": "test_neo_suggest.LogTests",
+            "seconds": 3e-05
+          },
+          {
+            "classId": "test_neo_suggest.NormalizeTests",
+            "seconds": 0.000105
+          },
+          {
+            "classId": "test_neo_suggest.ParseTests",
+            "seconds": 0.000151
+          },
+          {
+            "classId": "test_neo_suggest.PredictorTests",
+            "seconds": 0.000823
+          },
+          {
+            "classId": "test_neo_suggest.ServerTests",
+            "seconds": 2.3e-05
+          }
+        ]
+      }
+    }
+  ]
+}

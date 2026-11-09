@@ -1,6 +1,8 @@
 #!/bin/sh
 # Install or update Neo Suggest as a systemd --user service from GitHub.
 #   sh deploy/install.sh            (run as the service user, e.g. marck on GA401)
+# Release preparation on the PC: run python3 -B scripts/qualify_release.py in WSL first.
+# See docs/release-qualification.md; local receipts do not bypass remote acceptance.
 # Idempotent: fast-forwards the checkout, keeps ~/.config/neo-suggest/env, restarts, then smoke-tests.
 set -eu
 REPO=${NEO_REPO:-https://github.com/medking82/hermes-neo-composer.git}
