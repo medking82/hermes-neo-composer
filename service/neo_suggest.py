@@ -127,6 +127,57 @@ def parse_suggestion(raw):
     return value
 
 
+def _script_counts(text):
+    counts = {'kana': 0, 'hangul': 0, 'han': 0, 'latin': 0}
+    for c in text:
+        o = ord(c)
+        if 0x3040 <= o <= 0x30FF or 0x31F0 <= o <= 0x31FF or 0xFF66 <= o <= 0xFF9D:
+            counts['kana'] += 1
+        elif 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
+            counts['hangul'] += 1
+        elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF:
+            counts['han'] += 1
+        elif c.isascii() and c.isalpha() or 0x00C0 <= o <= 0x024F:
+            counts['latin'] += 1
+    return counts
+
+
+def detect_language(text):
+    """Coarse writing-system language: 'ja', 'ko', 'zh', 'latin', or None when undecidable.
+
+    CJK wins over Latin, so Chinese mixed with English technical terms stays 'zh'.
+    Simplified and Traditional Chinese are deliberately not distinguished.
+    """
+    n = _script_counts(text or '')
+    if n['kana'] >= 2 and n['kana'] >= n['hangul']:
+        return 'ja'
+    if n['hangul'] >= 2:
+        return 'ko'
+    if n['han'] >= 2:
+        return 'zh'
+    if n['latin'] >= 3:
+        return 'latin'
+    return None
+
+
+def conversation_language(history):
+    """Language the user writes in: their recent messages, falling back to the whole excerpt."""
+    users = [r['content'] for r in history if r['role'] == 'user'][-3:]
+    for texts in (users, [r['content'] for r in history]):
+        lang = detect_language('\n'.join(texts))
+        if lang:
+            return lang
+    return None
+
+
+def language_matches(suggestion, history):
+    want, got = conversation_language(history), detect_language(suggestion)
+    if want is None or got is None or want == got:
+        return True
+    # Kanji-only Japanese is indistinguishable from Chinese; allow it in a Japanese conversation.
+    return want == 'ja' and got == 'zh'
+
+
 def normalize_messages(messages) -> list[dict] | None:
     if not isinstance(messages, list) or not messages:
         return None
@@ -228,6 +279,9 @@ class Predictor:
                 break
             self.live_model, self.last_error = model, None
             parsed = parse_suggestion(raw)
+            if parsed and not language_matches(parsed, history):
+                # e.g. a Japanese suggestion for a Chinese conversation: drop it, never show it.
+                return {'suggestion': None, 'model': model, 'status': 'empty', 'filtered': 'language'}
             return {'suggestion': parsed or None, 'model': model, 'status': 'ready' if parsed else 'empty'}
         self.last_error = '; '.join(errors) or 'no candidate models configured'
         return {'suggestion': None, 'model': None, 'status': 'error', 'error': self.last_error}

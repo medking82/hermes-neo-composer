@@ -57,6 +57,37 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(ns._Server.allow_reuse_address, os.name != 'nt')
 
 
+class LanguageTests(unittest.TestCase):
+    def test_detect(self):
+        self.assertEqual(ns.detect_language('幫我把 README 的 install 步驟整理一下'), 'zh')
+        self.assertEqual(ns.detect_language('帮我整理一下'), 'zh')
+        self.assertEqual(ns.detect_language('READMEにWindowsでの手順も追記して。'), 'ja')
+        self.assertEqual(ns.detect_language('업데이트 절차도 추가해줘'), 'ko')
+        self.assertEqual(ns.detect_language('Please add the update steps'), 'latin')
+        self.assertIsNone(ns.detect_language('v0.5 ✅'))
+
+    def test_matches(self):
+        zh = [{'role': 'user', 'content': '幫我把 README 的安裝步驟整理一下'},
+              {'role': 'assistant', 'content': 'Done. Want update steps too?'}]
+        self.assertTrue(ns.language_matches('好，順便補上 update 流程的說明', zh))
+        self.assertFalse(ns.language_matches('READMEにWindowsでの手順も追記して。', zh))
+        self.assertFalse(ns.language_matches('Add the update steps too', zh))
+        self.assertTrue(ns.language_matches('v0.5', zh))  # undecidable -> keep
+        en = [{'role': 'user', 'content': 'Tidy up the README install steps'},
+              {'role': 'assistant', 'content': '已整理。'}]
+        self.assertTrue(ns.language_matches('Also add the update steps', en))
+        self.assertFalse(ns.language_matches('順便補上更新流程', en))
+        ja = [{'role': 'user', 'content': 'READMEの手順を整理して'}, {'role': 'assistant', 'content': 'ok'}]
+        self.assertTrue(ns.language_matches('続行', ja))
+
+    def test_predictor_drops_mismatch(self):
+        calls = []
+        p = ns.Predictor(cfg(), opener_for({'group/a': '{"suggestion":"READMEにWindowsでの手順も追記して。"}'}, calls))
+        r = p.predict(CONV)
+        self.assertEqual((r['status'], r['suggestion'], r.get('filtered')), ('empty', None, 'language'))
+        self.assertEqual(calls, ['group/a'])
+
+
 class ParseTests(unittest.TestCase):
     def test_valid_and_fenced(self):
         self.assertEqual(ns.parse_suggestion('{"suggestion":"幫我裝到 GA401"}'), '幫我裝到 GA401')
@@ -132,7 +163,7 @@ class HttpTests(unittest.TestCase):
     def start(self, **kw):
         c = cfg(port=0, **kw)
         calls = []
-        pred = ns.Predictor(c, opener_for({'group/a': '{"suggestion":"show me the diff"}'}, calls))
+        pred = ns.Predictor(c, opener_for({'group/a': '{"suggestion":"給我看一下 diff"}'}, calls))
         httpd = ThreadingHTTPServer(('127.0.0.1', 0), ns.make_handler(c, pred))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         self.addCleanup(httpd.shutdown)
@@ -152,7 +183,7 @@ class HttpTests(unittest.TestCase):
         code, _, body = self.req(base + '/healthz')
         self.assertEqual((code, body['contract']), (200, 'neo-suggest-v1'))
         code, _, body = self.req(base + '/v1/suggest', {'messages': CONV})
-        self.assertEqual((code, body['suggestion']), (200, 'show me the diff'))
+        self.assertEqual((code, body['suggestion']), (200, '給我看一下 diff'))
 
     def test_token_required(self):
         base = self.start(token='s3cret')
