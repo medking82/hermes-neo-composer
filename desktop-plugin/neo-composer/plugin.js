@@ -7,7 +7,7 @@
 //                    Tab-to-accept. It is feature-detected; if a Hermes update
 //                    renames the editor slot, the enhancer silently turns off and
 //                    the pill keeps working.
-import { COMPOSER_AREAS, KEYBINDS_AREA, PALETTE_AREA, host, writeClipboardText } from '@hermes/plugin-sdk'
+import { COMPOSER_AREAS, KEYBINDS_AREA, PALETTE_AREA, host } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -133,7 +133,7 @@ function useCtrl(ctrl) {
   return s
 }
 
-function Pill({ ctrl, accept }) {
+function Pill({ ctrl, accept, copy }) {
   const s = useCtrl(ctrl)
   if (!s.suggestion) return null
   const btn = 'rounded px-1.5 py-0.5 text-[0.6875rem] text-(--ui-text-tertiary) hover:bg-(--ui-bg-hover)'
@@ -147,7 +147,7 @@ function Pill({ ctrl, accept }) {
       }),
       jsx('button', {
         type: 'button', title: '複製', className: btn,
-        onClick: () => void writeClipboardText(s.suggestion).then(() => host.notify?.({ kind: 'info', message: '已複製建議' }))
+        onClick: () => void copy(s.suggestion)
       , children: '⧉' }),
       jsx('button', { type: 'button', title: '關閉', className: btn, onClick: () => ctrl.clear(), children: '✕' })
     ]
@@ -208,6 +208,12 @@ export default {
       return ok
     }
 
+    const copy = async text => {
+      const ok = await ctx.os?.writeClipboard(text)
+      host.notify?.({ kind: ok ? 'info' : 'error', message: ok ? '已複製建議' : '無法存取剪貼簿，可點擊建議填入輸入框' })
+      return !!ok
+    }
+
     // Trigger: focused session finished a turn, or focus moved to an idle session.
     let lastSid = null
     let lastBusy = false
@@ -227,7 +233,7 @@ export default {
     evaluate()
 
     ctx.registerMany([
-      { id: 'pill', area: COMPOSER_AREAS.underside, order: 40, render: () => jsx(Pill, { ctrl, accept }) },
+      { id: 'pill', area: COMPOSER_AREAS.underside, order: 40, render: () => jsx(Pill, { ctrl, accept, copy }) },
       { id: 'accept', area: KEYBINDS_AREA, data: {
         id: 'neo-composer.accept', label: '填入灰字建議', category: 'Neo Composer',
         defaults: ['mod+shift+enter'], run: () => accept() } },

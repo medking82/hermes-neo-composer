@@ -26,7 +26,7 @@ SEAMS = [
     ('sdk: COMPOSER_AREAS export', 'apps/desktop/src/sdk/index.ts', r'\bCOMPOSER_AREAS\b', True),
     ('sdk: underside area', 'apps/desktop/src/app/chat/composer/contrib.ts', r"underside", True),
     ('sdk: KEYBINDS_AREA / PALETTE_AREA', 'apps/desktop/src/sdk/index.ts', r'\bKEYBINDS_AREA\b[\s\S]*\bPALETTE_AREA\b|\bPALETTE_AREA\b[\s\S]*\bKEYBINDS_AREA\b', True),
-    ('sdk: writeClipboardText', 'apps/desktop/src/sdk/index.ts', r'\bwriteClipboardText\b', True),
+    ('sdk: context clipboard', 'apps/desktop/src/contrib', r'writeClipboard', True),
     ('sdk: composer host setDraft/focus', 'apps/desktop/src/sdk', r'setDraft[\s\S]*focus', True),
     ('sdk: focusedSessionId / busyBySession', 'apps/desktop/src/sdk/index.ts', r'focusedSessionId[\s\S]*busyBySession|busyBySession[\s\S]*focusedSessionId', True),
     ('gateway: session.history RPC', 'tui_gateway', r'"session\.history"', True),
