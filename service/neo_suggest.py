@@ -275,7 +275,7 @@ def make_handler(cfg, predictor):
         server_version = f'neo-suggest/{VERSION}'
 
         def log_message(self, format, *args):  # noqa: A002 - no conversation text is ever logged
-            sys.stderr.write('%s %s\n' % (self.log_date_time_string(), format % args))
+            log('%s %s' % (self.log_date_time_string(), format % args))
 
         def _origin_ok(self):
             origin = self.headers.get('Origin')
@@ -351,12 +351,24 @@ def make_handler(cfg, predictor):
     return Handler
 
 
+def log(line):
+    """Write a log line to stderr; no-op when there is none (pythonw / no console)."""
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        stream.write(line + '\n')
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
 def serve(cfg=None):
     cfg = cfg or load_config()
     predictor = Predictor(cfg)
     httpd = ThreadingHTTPServer((cfg['host'], cfg['port']), make_handler(cfg, predictor))
     httpd.daemon_threads = True
-    sys.stderr.write(f'neo-suggest {VERSION} on {cfg["host"]}:{cfg["port"]} -> {cfg["upstream"]} {cfg["models"]}\n')
+    log(f'neo-suggest {VERSION} on {cfg["host"]}:{cfg["port"]} -> {cfg["upstream"]} {cfg["models"]}')
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

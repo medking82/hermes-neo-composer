@@ -39,6 +39,18 @@ def cfg(**kw):
     return base
 
 
+class LogTests(unittest.TestCase):
+    def test_log_without_stderr(self):
+        # pythonw (Windows, no console) sets sys.stderr to None; logging must not crash the service.
+        import sys
+        saved = sys.stderr
+        try:
+            sys.stderr = None
+            ns.log('x')
+        finally:
+            sys.stderr = saved
+
+
 class ParseTests(unittest.TestCase):
     def test_valid_and_fenced(self):
         self.assertEqual(ns.parse_suggestion('{"suggestion":"幫我裝到 GA401"}'), '幫我裝到 GA401')
