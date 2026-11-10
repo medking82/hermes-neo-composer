@@ -2,7 +2,7 @@
 
 Ghost-text "next prompt" suggestions for Hermes Desktop, served by a small standalone service any client (Desktop, Forma, web UIs) can call.
 
-**v0.5 aims to reduce upgrade breakage.** The archived v0.4.x integration targets a fixed Hermes release and requires a separately installed host patch. v0.5 uses the Desktop SDK and a standalone service without a core patch. Compatibility still needs checking after updates; future versions are not guaranteed.
+**v0.5 aims to reduce upgrade breakage.** The archived v0.4.x integration targets a fixed Hermes release and requires a separately installed host patch. v0.5 uses the Desktop SDK and a standalone service; the only core change is the **optional** host adapter for strict image steer (see below), which is gated on file structure and anchors, never on a Hermes version number. Compatibility still needs checking after updates; future versions are not guaranteed.
 
 | Part | Depends only on | When upstream changes |
 |---|---|---|
@@ -19,6 +19,26 @@ The v0.4 code and README are kept under `legacy/v0.4/` for reference only.
 - **Below the box:** a pill with the same text — **click** fills the composer, **⧉** copies it, **✕** hides it.
 - `Ctrl/Cmd+Shift+Enter` (rebindable) fills it in; palette command "Neo Composer: 重新產生建議" asks again.
 - Settings ▸ Plugins ▸ Neo Composer: on/off, in-box on/off, service URL, optional token, connection test.
+
+## Keys while a turn is running
+
+| Key | Action |
+|---|---|
+| `Enter` | Queue the message for after the current turn (`busy=queue`, set per session) |
+| `Ctrl/Cmd+Enter` (rebindable `steerKey`) | **Strict steer** into the running turn: text + image attachments |
+| `Shift+Enter` | New line |
+
+Strict steer never falls back. The draft and attachments are cleared only when the host returns a matching `delivered` receipt (same session, execution generation and request id). Without the host adapter, or on `not_delivered` / `rejected` / timeout / stale generation, the draft and attachments stay and a warning appears; nothing is queued, interrupted or redirected. Images are **not** sent as native multimodal input: the gateway stages the bytes under the profile `cache/images/` and the steer row references them for the model to read with `vision_analyze`.
+
+## Host adapter (optional, one-click)
+
+`host-adapter/` adds the `neo.composer.capabilities` / `neo.composer.steer` RPCs and the safe-boundary delivery hook (details in `host-adapter/README.md`). Install from Settings ▸ Plugins ▸ Neo Composer ▸ Host adapter: **Check** (dry run), **Install**, **Rollback**. Opening the page never installs.
+
+- The buttons call the local service (`/v1/host-adapter/{check,status,install,rollback}`), which acts only on the configured `NEO_HERMES_ROOT`; the request can carry no path or command, mutations require `{"confirm": true}`, loopback client + Host, an allowed Origin (`NEO_CONTROL_ORIGINS`, default `null` + desktop dev origins) and a bearer `NEO_CONTROL_TOKEN` (falls back to `NEO_TOKEN`; no token → 503).
+- Compatibility = required files/symbols exist, each anchor matches exactly once, patched Python parses. No version pins, so ordinary Hermes updates need no plugin update; a moved seam is **refused** and rolled back, and the plugin keeps working without strict steer.
+- Backups go to `<root>/.neo-backups/<id>/`; files changed after install are not overwritten or deleted.
+- After install: restart the gateway. The backend becomes active then. The packaged desktop (`win-unpacked/Hermes.exe`, `app.asar`) is **not** rebuilt by the plugin; the UI says "frontend rebuild required" until the renderer is rebuilt from the patched source **in WSL** (never Windows Node). Until then `Ctrl+Enter` keeps the draft and warns.
+- After a Hermes update, run Check again; reinstall is idempotent.
 
 ## Service API (`neo-suggest-v1`)
 
@@ -58,9 +78,14 @@ Desktop hot-loads it. Do not bind the service to the LAN without `NEO_TOKEN`: it
 ## Develop and test (WSL / Linux, Node 22, Python 3.12+)
 
 ```sh
-(cd service && python3 -m unittest -v test_neo_suggest)
-node --test desktop-plugin/plugin.test.mjs
+python3 -m pytest -q service/test_neo_suggest.py service/test_host_control.py host-adapter/test_neo_host_adapter.py
+NEO_HERMES_TAR=<tar of Hermes HEAD> python3 -m pytest -q host-adapter/test_neo_host_adapter.py   # real-tree install/rollback
+node --test desktop-plugin/plugin.test.mjs desktop-plugin/settings.test.mjs
 python3 compat/smoke.py --hermes-src <hermes-agent checkout> --service http://127.0.0.1:3460 --live
 ```
+
+Gateway regression tests for the adapter live in `host-adapter/tests/` (run against an isolated Hermes checkout; see its README). Tests and builds run in WSL/Linux only; GA401 is for deployment acceptance, never tests.
+
+**Cleanup at the end of every task:** stop test gateways, fixture servers and probe services you started (check `ps`/listening ports in WSL and Windows), and delete scratch archives and temp dirs (`$HOME/neo-*`, `hermes-head.tar`, `neo-frontend-*`). Long-running services belong to systemd `--user` (Linux) or the Startup launcher (Windows), never to an ad-hoc background shell.
 
 MIT license.

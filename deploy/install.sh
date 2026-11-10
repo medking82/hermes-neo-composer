@@ -46,3 +46,10 @@ until curl -fsS -m 2 http://127.0.0.1:3460/healthz >/dev/null 2>&1; do
 done
 echo "installed $(git -C "$DIR" rev-parse --short HEAD)"
 python3 -I "$DIR/compat/smoke.py" --service http://127.0.0.1:3460 ${NEO_SMOKE_LIVE:+--live}
+
+# Optional host adapter (strict steer + images). Opt-in: NEO_HERMES_ROOT=/path/to/hermes-agent.
+# Structure-checked (never version-gated); refuses ambiguous trees; backs up to $ROOT/.neo-backups.
+# Undo: python3 host-adapter/neo_host_adapter.py rollback --root "$NEO_HERMES_ROOT"
+if [ -n "${NEO_HERMES_ROOT:-}" ]; then
+  python3 "$DIR/host-adapter/neo_host_adapter.py" install --root "$NEO_HERMES_ROOT" --frontend "${NEO_HOST_FRONTEND:-auto}"     || echo "host adapter refused: plugin keeps working, strict steer stays disabled" >&2
+fi

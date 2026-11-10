@@ -119,3 +119,62 @@ test('isEditorEmpty', () => {
   assert.equal(mod.isEditorEmpty({ hasAttribute: () => false, textContent: ' ​ ' }), true)
   assert.equal(mod.isEditorEmpty({ hasAttribute: () => false, textContent: 'x' }), false)
 })
+
+test('chord matching: ctrl+enter only; shift+enter and plain enter untouched', () => {
+  const ev = o => ({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...o })
+  assert.equal(mod.matchesChord(ev({ ctrlKey: true }), 'ctrl+enter'), true)
+  assert.equal(mod.matchesChord(ev({}), 'ctrl+enter'), false)
+  assert.equal(mod.matchesChord(ev({ shiftKey: true }), 'ctrl+enter'), false)
+  assert.equal(mod.matchesChord(ev({ ctrlKey: true, shiftKey: true }), 'ctrl+enter'), false)
+  assert.equal(mod.matchesChord(ev({ ctrlKey: true, isComposing: true }), 'ctrl+enter'), false)
+  assert.equal(mod.matchesChord(ev({ altKey: true }), 'alt+enter'), true)
+})
+
+function steerHost(composer) {
+  const notes = []
+  return { notes, host: { state: { focusedSessionId: atom('s1'), busyBySession: atom({ s1: true }) }, notify: n => notes.push(n), composer } }
+}
+
+test('steer without host seam fails closed: no queue, no submit, no draft write', async () => {
+  const calls2 = []
+  const { host, notes } = steerHost({ submit: () => calls2.push('submit'), setDraft: () => calls2.push('setDraft') })
+  const r = await mod.createSteerKey({ host, settings: () => ({ steerKey: 'ctrl+enter' }) }).steer('s1')
+  assert.equal(r.status, 'unsupported')
+  assert.deepEqual(calls2, [])
+  assert.equal(notes[0].kind, 'warning')
+})
+
+test('steer separates accepted from delivered and never queues on rejection', async () => {
+  for (const [res, text] of [[{ status: 'accepted', delivered: false }, '尚未送達'], [{ status: 'accepted', delivered: true }, '安全邊界'], [{ status: 'rejected', delivered: false }, '被拒絕']]) {
+    const { host, notes } = steerHost({ steerStrict: async () => res, submit: () => assert.fail('must not queue') })
+    const r = await mod.createSteerKey({ host, settings: () => ({ steerKey: 'ctrl+enter' }) }).steer('s1')
+    assert.equal(r.status, res.status)
+    assert.match(notes[0].message, new RegExp(text))
+  }
+})
+
+test('steer understands host contract-1 receipts and keeps the draft on anything but delivered', async () => {
+  for (const [res, text] of [[{ status: 'delivered' }, '安全邊界'], [{ status: 'not_delivered', reason: 'boundary_timeout' }, 'boundary_timeout'], [{ status: 'unknown' }, '未送達'], [{ status: 'idle' }, '沒有執行中']]) {
+    const { host, notes } = steerHost({ steerStrict: async () => res, submit: () => assert.fail('must not queue') })
+    const r = await mod.createSteerKey({ host, settings: () => ({ steerKey: 'ctrl+enter' }) }).steer('s1')
+    assert.equal(r.status, res.status)
+    assert.match(notes[0].message, new RegExp(text))
+  }
+})
+
+test('steer is ignored when idle and a throwing seam keeps the draft', async () => {
+  const idle = steerHost({ steerStrict: async () => assert.fail('idle') })
+  idle.host.state.busyBySession.set({})
+  assert.equal((await mod.createSteerKey({ host: idle.host, settings: () => ({}) }).steer('s1')).status, 'idle')
+  const bad = steerHost({ steerStrict: async () => { throw new Error('boom') } })
+  assert.equal((await mod.createSteerKey({ host: bad.host, settings: () => ({}) }).steer('s1')).status, 'error')
+})
+
+test('Enter-queues sets session-scoped busy=queue once per session', async () => {
+  const reqs = []
+  const host = { request: async (m, p) => { reqs.push([m, p]) } }
+  const done = new Set()
+  assert.equal(await mod.ensureQueueMode(host, 's1', done), true)
+  assert.equal(await mod.ensureQueueMode(host, 's1', done), false)
+  assert.deepEqual(reqs, [['config.set', { session_id: 's1', key: 'busy', value: 'queue' }]])
+})

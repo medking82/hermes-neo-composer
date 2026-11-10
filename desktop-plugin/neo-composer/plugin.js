@@ -1,7 +1,8 @@
 // Neo Composer v0.5 — ghost-text next-prompt suggestions for Hermes Desktop.
 //
 // Durability contract: only `@hermes/plugin-sdk` public surface + the standalone
-// neo-suggest HTTP service. No Hermes core patch.
+// neo-suggest HTTP service. Suggestions need no Hermes core patch; strict steering
+// uses the optional, capability-checked host adapter installed from settings.
 //   * stable path  : COMPOSER_AREAS.underside pill (click = fill composer, copy button)
 //   * enhancer     : in-box ghost text via the composer's placeholder attribute and
 //                    Tab-to-accept. It is feature-detected; if a Hermes update
@@ -13,7 +14,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 export const VERSION = '0.5.0'
 export const EDITOR_SELECTOR = "[data-slot='composer-rich-input']"
-export const DEFAULTS = { url: 'http://127.0.0.1:3460', token: '', enabled: true, inline: true }
+export const DEFAULTS = { url: 'http://127.0.0.1:3460', token: '', controlToken: '', enabled: true, inline: true, steerKey: 'ctrl+enter', enterQueues: true }
 const ORIGINAL = 'data-neo-original-placeholder'
 
 // ------------------------------------------------------------------ pure helpers
@@ -131,6 +132,72 @@ function installInline(ctrl, accept) {
   }
 }
 
+
+// ------------------------------------------------------------------ busy keyboard (Enter queues, chord steers)
+// Public-SDK only. Hermes core's own Ctrl+Enter *queues*; this plugin takes over that chord in capture phase
+// (same technique as Tab above) and NEVER falls back to queue/interrupt/redirect: if the host lacks the strict
+// steer seam (`host.composer.steerStrict`) the draft and attachments are left untouched and the user is told.
+// Seam contract (not in the current public SDK, see docs/busy-keyboard.md):
+//   steerStrict(sessionId) -> { status: 'accepted'|'rejected'|'unsupported', delivered: boolean, turnId?: string }
+// `accepted` = the targeted turn buffered it; only `delivered: true` (safe-boundary receipt) may clear the draft,
+// and clearing is the seam's job, never ours.
+export function parseChord(chord) {
+  const parts = String(chord || '').toLowerCase().split('+').map(x => x.trim()).filter(Boolean)
+  const key = parts.pop() || ''
+  const mods = new Set(parts)
+  return { key, ctrl: mods.has('ctrl') || mods.has('mod'), meta: mods.has('meta'), alt: mods.has('alt'), shift: mods.has('shift') }
+}
+
+export function matchesChord(ev, chord) {
+  const c = parseChord(chord)
+  if (!c.key || ev.isComposing) return false
+  return String(ev.key).toLowerCase() === c.key && !!ev.ctrlKey === c.ctrl && !!ev.metaKey === c.meta
+    && !!ev.altKey === c.alt && !!ev.shiftKey === c.shift
+}
+
+export function createSteerKey({ host, settings }) {
+  const notify = (kind, message) => host.notify?.({ kind, message })
+  async function steer(sessionId) {
+    if (!sessionId || !(host.state.busyBySession.get() || {})[sessionId]) return { status: 'idle' }
+    if (typeof host.composer?.steerStrict !== 'function') {
+      notify('warning', '此 Hermes 版本沒有嚴格 steer 介面：草稿與圖片已保留，未排隊也未中斷')
+      return { status: 'unsupported' }
+    }
+    let r
+    try { r = await host.composer.steerStrict(sessionId) } catch (err) {
+      notify('error', `Steer 失敗，草稿已保留：${String(err?.message || err)}`)
+      return { status: 'error' }
+    }
+    // Host contract 1 receipt: 'delivered' (matching request/generation/image_count receipt; the host already cleared
+    // the draft). Legacy-shaped { status:'accepted', delivered:true } is honoured too. Everything else keeps the draft.
+    const delivered = r?.status === 'delivered' || (r?.status === 'accepted' && r.delivered === true)
+    if (delivered) notify('info', '已在安全邊界送達（模型是否已讀取未確認）')
+    else if (r?.status === 'accepted') notify('info', '已被該回合接受，尚未送達；草稿保留至收到回執')
+    else if (r?.status === 'idle') notify('info', '該工作階段目前沒有執行中的回合，草稿已保留')
+    else notify('warning', r?.status === 'unsupported' ? '主機不支援 steer，草稿已保留'
+      : r?.status === 'rejected' ? 'Steer 被拒絕，草稿與圖片已保留'
+        : `Steer 未送達，草稿與圖片已保留${r?.reason ? '：' + r.reason : ''}`)
+    return r || { status: 'rejected' }
+  }
+  function onKey(ev) {
+    const s = settings()
+    if (!s.steerKey || !matchesChord(ev, s.steerKey)) return false
+    const el = ev.target?.closest?.(EDITOR_SELECTOR)
+    const sid = host.state.focusedSessionId.get()
+    if (!el || !sid || !(host.state.busyBySession.get() || {})[sid]) return false
+    ev.preventDefault(); ev.stopPropagation()
+    void steer(sid)
+    return true
+  }
+  return { steer, onKey }
+}
+
+export async function ensureQueueMode(host, sessionId, done) {
+  if (!sessionId || done.has(sessionId)) return false
+  done.add(sessionId)
+  try { await host.request('config.set', { session_id: sessionId, key: 'busy', value: 'queue' }); return true } catch { return false }
+}
+
 // ------------------------------------------------------------------ UI
 
 function useCtrl(ctrl) {
@@ -158,6 +225,85 @@ function Pill({ ctrl, accept, copy }) {
       jsx('button', { type: 'button', title: '關閉', className: btn, onClick: () => ctrl.clear(), children: '✕' })
     ]
   })
+}
+
+export function createHostAdapterClient({ fetchImpl, settings }) {
+  return {
+    async run(action) {
+      if (!['check', 'status', 'install', 'rollback'].includes(action)) throw new Error('unknown host-adapter action')
+      const s = settings()
+      let base
+      try { base = new URL(s.url) } catch { throw new Error('主機安裝僅支援 loopback 本機服務 URL') }
+      if (base.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname)
+          || base.username || base.password || base.pathname !== '/' || base.search || base.hash) {
+        throw new Error('主機安裝僅支援 loopback 本機服務 URL（不可含帳密或路徑）')
+      }
+      const token = s.controlToken || s.token
+      if (!token) throw new Error('請先設定主機控制 Token 或服務 Token；主機安裝必須驗證')
+      const mutation = action === 'install' || action === 'rollback'
+      const response = await fetchImpl(`${base.origin}/v1/host-adapter/${action}`, {
+        method: mutation ? 'POST' : 'GET',
+        headers: { Authorization: `Bearer ${token}`, ...(mutation ? { 'Content-Type': 'application/json' } : {}) },
+        ...(mutation ? { body: JSON.stringify({ confirm: true }) } : {}),
+        signal: AbortSignal.timeout(15000)
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+      return body
+    }
+  }
+}
+
+export async function probeHostAdapter(runtime) {
+  const sdk = typeof runtime.composer?.steerStrict === 'function'
+  const sessionId = runtime.state?.focusedSessionId?.get()
+  if (!sdk || !sessionId) return { sdk, backend: false, reason: sdk ? '請先選擇工作階段' : '目前 Renderer 沒有 steerStrict；請重建並重新啟動 Desktop' }
+  try {
+    const caps = await runtime.request('neo.composer.capabilities', { session_id: sessionId, protocol: 1 })
+    const backend = caps?.protocol === 1 && caps.image_mode === 'vision_analyze_reference'
+    return { sdk, backend, reason: backend ? '目前工作階段 Gateway protocol 1 已確認（送達仍須每次回執）' : 'Gateway 尚未確認相容能力' }
+  } catch (err) { return { sdk, backend: false, reason: `Gateway 能力未確認：${String(err?.message || err)}` } }
+}
+
+export function describeHostAdapter(state) {
+  const backend = state.backend?.source_applied ? '後端原始碼已套用；Gateway 仍須重新啟動' : '後端原始碼尚未套用'
+  const frontend = state.frontend?.state === 'source_missing' ? '此安裝缺少 Desktop 原始碼，無法在此重建 Renderer'
+    : state.frontend?.state === 'rollback_rebuild_required' ? '已回復原始碼；已部署的 Renderer 仍須回復／重建'
+      : state.frontend?.source_applied || state.frontend?.rebuild_required ? '前端原始碼已套用；仍須在 PC 的 WSL 重建並部署 Renderer'
+        : '前端原始碼尚未套用'
+  return `${backend}。${frontend}。`
+}
+
+export function HostAdapterSettings({ settings }) {
+  const [status, setStatus] = useState('尚未檢查主機 Adapter')
+  const [runtime, setRuntime] = useState('執行中能力尚未確認')
+  const [working, setWorking] = useState(false)
+  const [canRollback, setCanRollback] = useState(false)
+  const action = async name => {
+    setWorking(true)
+    setStatus(name === 'install' ? '正在安裝原始碼 Adapter…' : name === 'rollback' ? '正在回復上次安裝…' : '正在檢查…')
+    try {
+      const client = createHostAdapterClient({ fetchImpl: (...args) => fetch(...args), settings: () => settings })
+      const result = await client.run(name)
+      setStatus(`${result.root ? result.root + ' · ' : ''}${describeHostAdapter(result)}`)
+      setCanRollback(!!result.rollback_available)
+      const caps = await probeHostAdapter(host)
+      setRuntime(`Renderer SDK：${caps.sdk ? '已提供' : '缺少'} · ${caps.reason}`)
+    } catch (err) { setStatus(`主機操作未完成：${String(err?.message || err)}`) }
+    finally { setWorking(false) }
+  }
+  const button = (label, name, disabled = false) => jsx('button', {
+    type: 'button', disabled: working || disabled, onClick: () => action(name),
+    className: 'rounded border border-(--ui-border) px-2 py-1 disabled:opacity-50', children: label
+  })
+  return jsxs('div', { className: 'flex flex-col gap-2 border-t border-(--ui-border) pt-3', children: [
+    jsx('div', { className: 'font-medium', children: '選用：嚴格 Steer 主機 Adapter' }),
+    jsx('p', { className: 'text-(--ui-text-tertiary)', children: '點擊安裝會備份並修改本機已安裝的 Hermes 原始碼。相容性依結構與能力檢查，不依 Hermes 版本號。' }),
+    jsxs('div', { className: 'flex flex-wrap gap-2', children: [button('檢查主機介面', 'check'), button('安裝主機 Adapter', 'install'), button('回復上次安裝', 'rollback', !canRollback)] }),
+    jsx('p', { role: 'status', className: 'break-all text-(--ui-text-secondary)', children: status }),
+    jsx('p', { className: 'text-(--ui-text-tertiary)', children: runtime }),
+    jsx('p', { className: 'text-(--ui-text-tertiary)', children: '此按鈕只安裝原始碼；不會自動重建或替換 packaged／MSIX／app.asar Renderer。PC 請依 host-adapter/README.md 用 WSL 重建與部署完整 Renderer 後重啟。框內建議不需要此 Adapter。' })
+  ] })
 }
 
 function Settings({ ctrl, storage }) {
@@ -188,11 +334,15 @@ function Settings({ ctrl, storage }) {
       jsx('div', { className: 'font-medium', children: `Neo Composer ${VERSION}` }),
       check('啟用灰字建議', 'enabled'),
       check('框內灰字（Tab 填入）', 'inline'),
+      check('忙碌時 Enter 排隊（Shift+Enter 換行）', 'enterQueues'),
+      field('忙碌時 Steer 快捷鍵（例：ctrl+enter）', 'steerKey'),
       field('Suggest service URL', 'url'),
-      field('Token（選填）', 'token', 'password'),
+      field('Token（建議服務；主機控制未另設時共用）', 'token', 'password'),
+      field('主機控制 Token（選填；NEO_CONTROL_TOKEN）', 'controlToken', 'password'),
       jsxs('div', { className: 'flex items-center gap-2', children: [
         jsx('button', { type: 'button', className: 'rounded border border-(--ui-border) px-2 py-1', onClick: test, children: '測試連線' }),
-        jsx('span', { className: 'text-(--ui-text-tertiary)', children: health })] })
+        jsx('span', { className: 'text-(--ui-text-tertiary)', children: health })] }),
+      jsx(HostAdapterSettings, { settings: v })
     ]
   })
 }
@@ -231,7 +381,17 @@ export default {
       lastSid = sid
       lastBusy = busy
     }
+    const steerKey = createSteerKey({ host, settings: () => ctrl.settings() })
+    const queued = new Set()
+    const keyListener = ev => { steerKey.onKey(ev) }
+    if (typeof document !== 'undefined') document.addEventListener('keydown', keyListener, true)
+    const applyQueue = () => {
+      const sid = host.state.focusedSessionId.get()
+      if (ctrl.settings().enterQueues && (host.state.busyBySession.get() || {})[sid]) void ensureQueueMode(host, sid, queued)
+    }
     const unsubs = [
+      () => { if (typeof document !== 'undefined') document.removeEventListener('keydown', keyListener, true) },
+      host.state.busyBySession.listen(applyQueue),
       host.state.focusedSessionId.listen(evaluate),
       host.state.busyBySession.listen(evaluate),
       installInline(ctrl, accept)

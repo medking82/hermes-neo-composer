@@ -18,6 +18,8 @@ Configuration (environment variables, or a JSON file named by NEO_CONFIG):
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import ipaddress
 import hmac
 import json
 import os
@@ -27,6 +29,7 @@ import threading
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +85,9 @@ def load_config(env=None) -> dict:
         'upstream_key': _read_secret(env.get('NEO_UPSTREAM_KEY'), env.get('NEO_UPSTREAM_KEY_FILE')),
         'models': [m.strip() for m in env.get('NEO_MODELS', 'group/hestia,group/fast').split(',') if m.strip()],
         'token': _read_secret(env.get('NEO_TOKEN'), env.get('NEO_TOKEN_FILE')),
+        'control_token': _read_secret(env.get('NEO_CONTROL_TOKEN'), env.get('NEO_CONTROL_TOKEN_FILE')),
+        'control_origins': [o.strip() for o in env.get('NEO_CONTROL_ORIGINS', '').split(',') if o.strip()],
+        'hermes_root': env.get('NEO_HERMES_ROOT', ''),
         'cors': [o.strip() for o in env.get('NEO_CORS_ORIGINS', '').split(',') if o.strip()],
         'timeout': float(env.get('NEO_TIMEOUT', '25')),
     }
@@ -323,7 +329,28 @@ class Predictor:
 # --------------------------------------------------------------------------- HTTP
 
 def make_handler(cfg, predictor):
+    # Explicit file loading also works under python -I / pythonw; no Hermes imports.
+    module_name = '_neo_host_control'
+    if module_name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(module_name, HERE / 'host_control.py')
+        if spec is None or spec.loader is None:
+            raise RuntimeError('host control module unavailable')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    control_module = sys.modules[module_name]
+    control = control_module.HostControl(cfg)
     extra_origins = set(cfg['cors'])
+    control_origins = {'null', 'http://localhost:5174', 'http://127.0.0.1:5174'} | {
+        origin for origin in cfg.get('control_origins', []) if origin != '*'}
+
+    def loopback(host):
+        if host == 'localhost':
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f'neo-suggest/{VERSION}'
@@ -357,7 +384,60 @@ def make_handler(cfg, predictor):
             got = self.headers.get('Authorization', '')
             return hmac.compare_digest(got, 'Bearer ' + cfg['token'])
 
+        def _control(self, preflight=False):
+            # Bind, peer and Host checks keep control local even if prediction is exposed.
+            origin = self.headers.get('Origin')
+            try:
+                host = urllib.parse.urlsplit('http://' + self.headers.get('Host', ''))
+                local_host = loopback(host.hostname or '') and host.port == self.server.server_port
+            except ValueError:
+                local_host = False
+            if (not loopback(cfg['host']) or not loopback(self.client_address[0]) or not local_host
+                    or (origin is not None and origin not in control_origins)):
+                self._send(403, {'error': 'host control requires loopback and an allowed origin'})
+                return
+            if preflight:
+                self.send_response(204)
+                if origin:
+                    self.send_header('Access-Control-Allow-Origin', origin)
+                    self.send_header('Vary', 'Origin')
+                self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+                self.send_header('Access-Control-Allow-Private-Network', 'true')
+                self.end_headers()
+                return
+            token = cfg.get('control_token') or cfg['token']
+            if not token:
+                return self._send(503, {'error': 'host control requires a configured token'}, origin)
+            if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
+                return self._send(401, {'error': 'unauthorized'}, origin)
+            action = self.path.removeprefix('/v1/host-adapter/')
+            if action not in {'check', 'status', 'install', 'rollback'}:
+                return self._send(404, {'error': 'unknown host-adapter action'}, origin)
+            mutation = action in {'install', 'rollback'}
+            if self.command != ('POST' if mutation else 'GET'):
+                return self._send(405, {'error': 'method not allowed'}, origin)
+            if mutation:
+                if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+                    return self._send(415, {'error': 'application/json required'}, origin)
+                try:
+                    length = int(self.headers.get('Content-Length') or 0)
+                    if not 0 < length <= 2048:
+                        raise ValueError('invalid length')
+                    payload = json.loads(self.rfile.read(length).decode('utf-8'))
+                except (ValueError, UnicodeError):
+                    return self._send(400, {'error': 'invalid JSON body'}, origin)
+                if not isinstance(payload, dict) or set(payload) != {'confirm'} or payload['confirm'] is not True:
+                    return self._send(400, {'error': 'explicit confirm:true required; no other parameters accepted'}, origin)
+            try:
+                result = control.run(action)
+            except control_module.ControlError as exc:
+                return self._send(exc.code, {'error': str(exc), 'compatible': False, 'can_install': False}, origin)
+            self._send(200, result, origin)
+
         def do_OPTIONS(self):
+            if self.path.startswith('/v1/host-adapter/'):
+                return self._control(preflight=True)
             ok, origin = self._origin_ok()
             if not ok:
                 return self._send(403, {'error': 'origin not allowed'})
@@ -372,6 +452,8 @@ def make_handler(cfg, predictor):
             self.end_headers()
 
         def do_GET(self):
+            if self.path.startswith('/v1/host-adapter/'):
+                return self._control()
             ok, origin = self._origin_ok()
             if not ok:
                 return self._send(403, {'error': 'origin not allowed'})
@@ -382,6 +464,8 @@ def make_handler(cfg, predictor):
                              'last_error': predictor.last_error, 'auth': bool(cfg['token'])}, origin)
 
         def do_POST(self):
+            if self.path.startswith('/v1/host-adapter/'):
+                return self._control()
             ok, origin = self._origin_ok()
             if not ok:
                 return self._send(403, {'error': 'origin not allowed'})
