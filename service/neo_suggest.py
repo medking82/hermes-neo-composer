@@ -509,6 +509,13 @@ def log(line):
 
 def serve(cfg=None):
     cfg = cfg or load_config()
+    if os.name == 'nt':
+        spec = importlib.util.spec_from_file_location('_neo_desktop_bootstrap', HERE / 'desktop_install.py')
+        if spec is None or spec.loader is None:
+            raise RuntimeError('desktop bootstrap unavailable')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.bootstrap_token(cfg)
     predictor = Predictor(cfg)
     httpd = _Server((cfg['host'], cfg['port']), make_handler(cfg, predictor))
     httpd.daemon_threads = True

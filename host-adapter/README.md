@@ -6,7 +6,28 @@ Gate = **structure + contract**, never the Hermes release number. Unknown future
 - Hook points (anchors, marker `neo-composer:strict-steer:v1`): `gateway/session_controls.py` (handler registration), `agent/turn_iteration_prep.py` (boundary delivery). Frontend (source checkouts only): `sdk/composer.ts` (`steerStrict`), `use-composer-submit.ts`, `neo-strict-steer.ts`.
 - Plugin feature-detects `host.composer.steerStrict`; absent/failed → draft + attachments kept, no queue/interrupt fallback.
 
-## Install
+## Install from Neo Composer
+
+Open Settings → Plugins → Neo Composer → Host adapter, then click **Install**.
+The PC service automatically provisions the control token in the plugin's private
+SDK data folder. It acquires Hermes' own update/build locks, backs up and applies
+the structure-checked patch, and runs the installed Windows Hermes build scripts
+into a separate staging directory. The install path does not depend on WSL.
+
+After archive, Electron entry and renderer asset verification succeeds, fully quit
+Hermes (including the tray). The service swaps in the verified resources, preserves
+the previous resources for rollback, and reopens Hermes. It never kills the current
+conversation. Do not reopen manually during the handoff. Source/resource drift is
+refused. **Rollback** cancels a pending installation or schedules the saved package
+for the next exit, together with restoring the source. Build failures restore the
+new source patch and leave the running resources untouched.
+
+The settings status distinguishes staged / awaiting exit from installed, and
+checks running SDK/RPC capabilities separately. Log: `.neo-desktop-build.log` in
+the Hermes checkout. MSIX-only installations without a writable source checkout
+are not supported by this optional adapter.
+
+## Installer CLI (source only)
 ```
 python3 host-adapter/neo_host_adapter.py check     --root <hermes-agent>   # dry run
 python3 host-adapter/neo_host_adapter.py install   --root <hermes-agent> [--frontend auto|skip|require]

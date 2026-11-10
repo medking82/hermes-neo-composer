@@ -37,7 +37,8 @@ Strict steer never falls back. The draft and attachments are cleared only when t
 - The buttons call the local service (`/v1/host-adapter/{check,status,install,rollback}`), which acts only on the configured `NEO_HERMES_ROOT`; the request can carry no path or command, mutations require `{"confirm": true}`, loopback client + Host, an allowed Origin (`NEO_CONTROL_ORIGINS`, default `null` + desktop dev origins) and a bearer `NEO_CONTROL_TOKEN` (falls back to `NEO_TOKEN`; no token → 503).
 - Compatibility = required files/symbols exist, each anchor matches exactly once, patched Python parses. No version pins, so ordinary Hermes updates need no plugin update; a moved seam is **refused** and rolled back, and the plugin keeps working without strict steer.
 - Backups go to `<root>/.neo-backups/<id>/`; files changed after install are not overwritten or deleted.
-- After install: restart the gateway. The backend becomes active then. The packaged desktop (`win-unpacked/Hermes.exe`, `app.asar`) is **not** rebuilt by the plugin; the UI says "frontend rebuild required" until the renderer is rebuilt from the patched source **in WSL** (never Windows Node). Until then `Ctrl+Enter` keeps the draft and warns.
+- On Windows the service generates a persistent control credential and shares it through `ctx.files.readText('data', 'control.json')`; no manual token is needed. Install acquires Hermes' checkout/build locks, patches the source, runs Hermes' own Windows `build` + `builder` into an isolated stage, and verifies the archive, Electron entry and renderer assets. No WSL is used by the install button. A build failure rolls back the new source patch and leaves the running package intact.
+- When the UI reports **build verified, close Hermes**, fully quit Hermes (including the tray). The local service backs up and replaces the packaged resources, then reopens Hermes, which starts the updated gateway. It refuses staged or live file drift. Rollback cancels a pending install, or restores both source and the previous packaged resources at the next exit. Execution capability is checked separately; pending builds never count as enabled. Build details: `<hermes-root>/.neo-desktop-build.log`.
 - After a Hermes update, run Check again; reinstall is idempotent.
 
 ## Service API (`neo-suggest-v1`)
@@ -78,13 +79,13 @@ Desktop hot-loads it. Do not bind the service to the LAN without `NEO_TOKEN`: it
 ## Develop and test (WSL / Linux, Node 22, Python 3.12+)
 
 ```sh
-python3 -m pytest -q service/test_neo_suggest.py service/test_host_control.py host-adapter/test_neo_host_adapter.py
+python3 -m pytest -q service/test_neo_suggest.py service/test_host_control.py service/test_desktop_install.py host-adapter/test_neo_host_adapter.py
 NEO_HERMES_TAR=<tar of Hermes HEAD> python3 -m pytest -q host-adapter/test_neo_host_adapter.py   # real-tree install/rollback
 node --test desktop-plugin/plugin.test.mjs desktop-plugin/settings.test.mjs
 python3 compat/smoke.py --hermes-src <hermes-agent checkout> --service http://127.0.0.1:3460 --live
 ```
 
-Gateway regression tests for the adapter live in `host-adapter/tests/` (run against an isolated Hermes checkout; see its README). Tests and builds run in WSL/Linux only; GA401 is for deployment acceptance, never tests.
+Gateway regression tests for the adapter live in `host-adapter/tests/` (run against an isolated Hermes checkout; see its README). Development tests run in WSL/Linux. The user-authorized exception is the Neo install button's Windows Hermes packaging; GA401 is for deployment acceptance, never tests.
 
 **Cleanup at the end of every task:** stop test gateways, fixture servers and probe services you started (check `ps`/listening ports in WSL and Windows), and delete scratch archives and temp dirs (`$HOME/neo-*`, `hermes-head.tar`, `neo-frontend-*`). Long-running services belong to systemd `--user` (Linux) or the Startup launcher (Windows), never to an ad-hoc background shell.
 

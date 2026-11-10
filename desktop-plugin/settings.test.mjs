@@ -1,4 +1,5 @@
 // node --test desktop-plugin/settings.test.mjs (WSL only)
+
 import { registerHooks } from 'node:module'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -38,6 +39,18 @@ test('control client rejects remote URLs, missing tokens and unknown actions wit
   const c = mod.createHostAdapterClient({ settings: () => ({ url: 'http://localhost:3460' }), fetchImpl: () => assert.fail('network') })
   await assert.rejects(c.run('check'), /Token|token/)
   await assert.rejects(c.run('command'), /action/)
+})
+
+test('local credential is read through the private SDK file door without network bootstrap', async () => {
+  const calls = []
+  const client = mod.createHostAdapterClient({ settings: () => ({ url: 'http://127.0.0.1:3460' }),
+    files: { readText: async (folder, path) => { assert.equal(folder, 'data'); assert.equal(path, 'control.json'); return { ok: true, text: JSON.stringify({ token: 'generated-credential' }) } } },
+    fetchImpl: async (url, init) => { calls.push([url, init]); return { ok: true, json: async () => ({ desktop: { state: 'waiting_for_exit' } }) } } })
+  const result = await client.run('install')
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][1].headers.Authorization, 'Bearer generated-credential')
+  assert.match(mod.describeHostAdapter(result), /建置並驗證/)
+  assert.doesNotMatch(mod.describeHostAdapter(result), /已啟用/)
 })
 
 test('source status never advertises runtime enabled; runtime needs SDK and contract-1 RPC', async () => {

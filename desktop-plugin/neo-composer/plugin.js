@@ -227,7 +227,7 @@ function Pill({ ctrl, accept, copy }) {
   })
 }
 
-export function createHostAdapterClient({ fetchImpl, settings }) {
+export function createHostAdapterClient({ fetchImpl, settings, files }) {
   return {
     async run(action) {
       if (!['check', 'status', 'install', 'rollback'].includes(action)) throw new Error('unknown host-adapter action')
@@ -238,14 +238,18 @@ export function createHostAdapterClient({ fetchImpl, settings }) {
           || base.username || base.password || base.pathname !== '/' || base.search || base.hash) {
         throw new Error('主機安裝僅支援 loopback 本機服務 URL（不可含帳密或路徑）')
       }
-      const token = s.controlToken || s.token
+      let token = s.controlToken || s.token
+      if (!token && files?.readText) {
+        const credential = await files.readText('data', 'control.json')
+        if (credential.ok) token = JSON.parse(credential.text).token
+      }
       if (!token) throw new Error('請先設定主機控制 Token 或服務 Token；主機安裝必須驗證')
       const mutation = action === 'install' || action === 'rollback'
       const response = await fetchImpl(`${base.origin}/v1/host-adapter/${action}`, {
         method: mutation ? 'POST' : 'GET',
         headers: { Authorization: `Bearer ${token}`, ...(mutation ? { 'Content-Type': 'application/json' } : {}) },
         ...(mutation ? { body: JSON.stringify({ confirm: true }) } : {}),
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(mutation ? 3700000 : 15000)
       })
       const body = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
@@ -266,24 +270,27 @@ export async function probeHostAdapter(runtime) {
 }
 
 export function describeHostAdapter(state) {
+  if (state.desktop?.state === 'waiting_for_exit') return 'Windows 桌面版已建置並驗證。請結束 Hermes（含系統匣）；服務會自動套用並重新開啟。'
+  if (state.desktop?.state === 'installed') return 'Windows 桌面版已套用；執行中能力仍以 Renderer SDK 與 Gateway 檢查為準。'
+  if (['failed', 'promotion_failed'].includes(state.desktop?.state)) return `安裝未完成：${state.desktop.error}；建置記錄：${state.desktop.log || ''}`
   const backend = state.backend?.source_applied ? '後端原始碼已套用；Gateway 仍須重新啟動' : '後端原始碼尚未套用'
   const frontend = state.frontend?.state === 'source_missing' ? '此安裝缺少 Desktop 原始碼，無法在此重建 Renderer'
     : state.frontend?.state === 'rollback_rebuild_required' ? '已回復原始碼；已部署的 Renderer 仍須回復／重建'
-      : state.frontend?.source_applied || state.frontend?.rebuild_required ? '前端原始碼已套用；仍須在 PC 的 WSL 重建並部署 Renderer'
+      : state.frontend?.source_applied || state.frontend?.rebuild_required ? '前端原始碼已套用；仍須重建並部署 Renderer'
         : '前端原始碼尚未套用'
   return `${backend}。${frontend}。`
 }
 
-export function HostAdapterSettings({ settings }) {
+export function HostAdapterSettings({ settings, files }) {
   const [status, setStatus] = useState('尚未檢查主機 Adapter')
   const [runtime, setRuntime] = useState('執行中能力尚未確認')
   const [working, setWorking] = useState(false)
   const [canRollback, setCanRollback] = useState(false)
   const action = async name => {
     setWorking(true)
-    setStatus(name === 'install' ? '正在安裝原始碼 Adapter…' : name === 'rollback' ? '正在回復上次安裝…' : '正在檢查…')
+    setStatus(name === 'install' ? '正在備份、安裝與建置 Windows 桌面版，請保持 Hermes 開啟…' : name === 'rollback' ? '正在回復上次安裝…' : '正在檢查…')
     try {
-      const client = createHostAdapterClient({ fetchImpl: (...args) => fetch(...args), settings: () => settings })
+      const client = createHostAdapterClient({ fetchImpl: (...args) => fetch(...args), settings: () => settings, files })
       const result = await client.run(name)
       setStatus(`${result.root ? result.root + ' · ' : ''}${describeHostAdapter(result)}`)
       setCanRollback(!!result.rollback_available)
@@ -302,11 +309,11 @@ export function HostAdapterSettings({ settings }) {
     jsxs('div', { className: 'flex flex-wrap gap-2', children: [button('檢查主機介面', 'check'), button('安裝主機 Adapter', 'install'), button('回復上次安裝', 'rollback', !canRollback)] }),
     jsx('p', { role: 'status', className: 'break-all text-(--ui-text-secondary)', children: status }),
     jsx('p', { className: 'text-(--ui-text-tertiary)', children: runtime }),
-    jsx('p', { className: 'text-(--ui-text-tertiary)', children: '此按鈕只安裝原始碼；不會自動重建或替換 packaged／MSIX／app.asar Renderer。PC 請依 host-adapter/README.md 用 WSL 重建與部署完整 Renderer 後重啟。框內建議不需要此 Adapter。' })
+    jsx('p', { className: 'text-(--ui-text-tertiary)', children: 'Windows 安裝會自動備份、套用 Adapter 並在本機建置桌面版，不需要 WSL。顯示建置完成後，請結束 Hermes（含系統匣）；服務會套用並自動重新開啟。Token 自動設定，框內建議不需要此 Adapter。' })
   ] })
 }
 
-function Settings({ ctrl, storage }) {
+function Settings({ ctrl, storage, files }) {
   const [v, setV] = useState(ctrl.settings())
   const [health, setHealth] = useState('')
   const save = next => { setV(next); storage.set('settings', next) }
@@ -342,7 +349,7 @@ function Settings({ ctrl, storage }) {
       jsxs('div', { className: 'flex items-center gap-2', children: [
         jsx('button', { type: 'button', className: 'rounded border border-(--ui-border) px-2 py-1', onClick: test, children: '測試連線' }),
         jsx('span', { className: 'text-(--ui-text-tertiary)', children: health })] }),
-      jsx(HostAdapterSettings, { settings: v })
+      jsx(HostAdapterSettings, { settings: v, files })
     ]
   })
 }
@@ -407,7 +414,7 @@ export default {
         id: 'neo-composer.refresh', label: 'Neo Composer: 重新產生建議', keywords: ['neo', 'suggest', '灰字'],
         run: () => void ctrl.refresh(host.state.focusedSessionId.get()) } }
     ])
-    ctx.registerSettingsPage?.({ id: 'neo-composer', title: 'Neo Composer', render: () => jsx(Settings, { ctrl, storage: ctx.storage }) })
+    ctx.registerSettingsPage?.({ id: 'neo-composer', title: 'Neo Composer', render: () => jsx(Settings, { ctrl, storage: ctx.storage, files: ctx.files }) })
 
     ctx.onDispose?.(() => { for (const u of unsubs) u?.() })
   }

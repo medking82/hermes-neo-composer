@@ -1,8 +1,4 @@
-"""Fixed-root, source-only host adapter control. No subprocess or client paths.
-
-The HTTP server supplies authentication/origin gates. This module never launches
-builds or restarts a gateway. A source patch is not evidence of runtime support.
-"""
+"""Fixed-root host adapter control with verified Windows Desktop staging."""
 from __future__ import annotations
 
 import hashlib
@@ -58,6 +54,16 @@ class HostControl:
         self.root = installed_root(cfg)
         self.mutex = threading.Lock()
         self.installer = load_installer()
+        name = '_neo_desktop_install'
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name('desktop_install.py'))
+            if spec is None or spec.loader is None:
+                raise RuntimeError('desktop installer unavailable')
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        self.desktop = sys.modules[name].DesktopInstall(self.root)
+        self.desktop.monitor(self.mutex)
 
     def _paths(self):
         plan = self.installer.build_plan()
@@ -77,7 +83,9 @@ class HostControl:
     def _validate(self):
         if not self.root.is_dir():
             raise ControlError('installed Hermes source root not found', 422)
-        for rel in [*self._paths(), RECEIPT, LOCK, self.installer.MANIFEST, self.installer.BACKUPS]:
+        for rel in [*self._paths(), RECEIPT, LOCK, self.installer.MANIFEST, self.installer.BACKUPS,
+                    '.neo-desktop-install.json', '.neo-desktop-stage', '.neo-desktop-resources-backup',
+                    '.neo-desktop-swap-old', '.neo-desktop-build.log']:
             self._safe(rel)
 
     def _receipt(self):
@@ -92,19 +100,19 @@ class HostControl:
         frontend_changes = [rel for rel in all_changes if rel.startswith('apps/desktop/')]
         backend_applied = not backend
         frontend_applied = has_frontend and not frontend_changes
+        desktop = self.desktop.read()
         return {
+            'desktop': desktop,
             'contract': 1, 'root': str(self.root), 'compatible': True,
             'can_install': bool(all_changes), 'pending': sorted(all_changes),
             'backend': {'source_applied': backend_applied, 'restart_required': backend_applied,
                         'runtime_verified': False},
             'frontend': {'state': ('rebuild_required' if frontend_applied else 'source_pending')
                          if has_frontend else 'source_missing',
-                         'source_applied': frontend_applied, 'automatic_rebuild': False,
+                         'source_applied': frontend_applied, 'automatic_rebuild': self.desktop.available,
                          'rebuild_required': frontend_applied,
-                         'reason': 'Source patches require a rebuilt source Desktop and gateway restart. '
-                                   'Neo cannot replace a packaged/MSIX/app.asar renderer. '
-                                   'Use deploy/rebuild-host-wsl.sh in WSL on PC; launch its source Desktop. '
-                                   'Capability availability must be checked in that running app.'},
+                         'reason': 'On Windows, Install builds and verifies a staged Desktop. Close Hermes after '
+                                   'the build completes; the local service applies it and reopens Hermes.'},
             'rollback_available': bool(self._receipt()),
         }
 
@@ -132,7 +140,7 @@ class HostControl:
         path = self._safe(RECEIPT)
         path.write_text(json.dumps(receipt, indent=2), encoding='utf-8')
 
-    def _rollback(self):
+    def _validate_rollback(self):
         receipt = self._receipt()
         if not receipt:
             raise ControlError('no click-install rollback receipt; use the installer CLI for older installs')
@@ -149,6 +157,10 @@ class HostControl:
                 raise ControlError('source changed since install; refusing rollback: ' + rel)
             if kind == 'modified' and digest(self._safe(base + '/' + rel)) != receipt['originals'].get(rel):
                 raise ControlError('backup changed since install; refusing rollback: ' + rel)
+        return bid
+
+    def _rollback(self):
+        bid = self._validate_rollback()
         result = self.installer.rollback(self.root, bid)
         self._safe(RECEIPT).unlink()
         return result
@@ -162,12 +174,28 @@ class HostControl:
             self._validate()
             result = None
             if action in {'install', 'rollback'}:
-                with self._mutation():
+                with self._mutation(), self.desktop.custody():
                     if action == 'install':
+                        if self.desktop.read().get('state') == 'waiting_for_exit':
+                            raise ControlError('Desktop is ready; close Hermes to finish installation')
                         result = self.installer.install(self.root, 'auto')
                         if result['status'] == 'installed':
                             self._save_receipt(result)
+                        desktop_state = self.desktop.read()
+                        already_built = (self.desktop.available and result['status'] != 'installed' and desktop_state.get('state') == 'installed'
+                                         and self.desktop.tree_hash(self.desktop.resources) == desktop_state.get('stage_hash'))
+                        if self.desktop.available and not already_built:
+                            try:
+                                self.desktop.prepare()
+                            except Exception:
+                                if result['status'] == 'installed':
+                                    self._rollback()
+                                raise
                     else:
+                        # Refuse drift before touching either Desktop or source files.
+                        self._validate_rollback()
+                        if self.desktop.available:
+                            self.desktop.prepare_rollback()
                         result = self._rollback()
             state = self._view()
             if result:
@@ -180,7 +208,7 @@ class HostControl:
             return state
         except self.installer.Refuse as exc:
             raise ControlError(str(exc), 422) from exc
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             raise ControlError('host-adapter operation refused: ' + str(exc), 422) from exc
         finally:
             self.mutex.release()
