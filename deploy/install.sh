@@ -4,7 +4,7 @@
 # Idempotent: fast-forwards the checkout, keeps ~/.config/neo-suggest/env, restarts, then smoke-tests.
 set -eu
 REPO=${NEO_REPO:-https://github.com/medking82/hermes-neo-composer.git}
-BRANCH=${NEO_BRANCH:-main}
+BRANCH=${NEO_BRANCH:-v0.5-durable}
 DIR=$HOME/services/neo-suggest
 CFG=$HOME/.config/neo-suggest
 UNIT_DIR=$HOME/.config/systemd/user

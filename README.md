@@ -56,7 +56,7 @@ The last message must be from the assistant. Rows with images, data URLs or loca
 **GA401 (or any Linux host with systemd linger), as the service user:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/medking82/hermes-neo-composer/main/deploy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/medking82/hermes-neo-composer/v0.5-durable/deploy/install.sh | sh
 # or, from an existing checkout:  sh ~/services/neo-suggest/deploy/install.sh
 ```
 
