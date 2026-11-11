@@ -1,0 +1,13 @@
+name: neo-composer
+version: 0.5.1
+manifest_version: 2
+api_version: 1
+license: MIT
+provides_tools: []
+provides_hooks: []
+provides_middleware: []
+requires_env: []
+description: Grounded next-message candidates with explicit refresh and safe draft acceptance.
+author: medking82
+homepage: https://github.com/medking82/hermes-neo-composer
+requires_hermes: '>=0.23.1'

@@ -12,6 +12,13 @@ Ghost-text "next prompt" suggestions for Hermes Desktop, served by a small stand
 
 The v0.4 code and README are kept under `legacy/v0.4/` for reference only.
 
+## SDK-only catalog preview
+
+[`catalog/`](catalog/README.md) is a separate unified plugin package (0.5.1 development preview) for future catalog review. It uses Hermes `ctx.llm` and public Desktop SDK contributions, with no standalone service, token-file access, DOM enhancer, core patch or self-updater. A catalog entry can select it with `subdir: catalog`. It adds per-session caching, explicit refresh, conservative output filters and draft-preserving acceptance.
+
+The preview displays suggestions below the composer; in-input ghost text and strict steer await upstream SDK issues [#153327](https://github.com/NousResearch/hermes-agent/issues/153327) and [#153301](https://github.com/NousResearch/hermes-agent/issues/153301). Marketplace submission remains paused. See its README for installation, quota/data disclosures, compatibility and verification limits. The advanced distribution documented below remains available.
+
+
 ## Interaction (Desktop)
 
 - When the focused chat finishes a turn, the plugin reads the session history, asks the service, and shows one suggestion.
