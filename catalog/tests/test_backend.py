@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import subprocess
@@ -79,15 +80,37 @@ class CandidateTests(unittest.TestCase):
         self.store.dismiss('a', old['token'])
         self.assertEqual(self.store.prepare('a', ROWS)['text'], 'New candidate')
 
-    def test_model_uses_host_default_without_override_or_tools(self):
+    def test_model_uses_registered_host_route_without_direct_overrides(self):
         token = self.store.prepare('a', ROWS)['token']
         def complete(messages, **kwargs):
             self.assertEqual(messages[0]['role'], 'system')
             self.assertEqual(json.loads(messages[1]['content'])['conversation'], ROWS)
-            self.assertEqual(set(kwargs), {'max_tokens', 'temperature', 'timeout', 'purpose'})
+            self.assertEqual(set(kwargs), {'max_tokens', 'temperature', 'timeout', 'purpose', 'task'})
+            self.assertEqual(kwargs['task'], 'neo_composer')
             return SimpleNamespace(text='{"suggestion":null}')
-        result = api.generate(SimpleNamespace(llm=SimpleNamespace(complete=complete)), self.store, 'a', {'token': token, 'messages': ROWS})
+        result = api.generate(SimpleNamespace(llm=SimpleNamespace(complete=complete)), self.store, 'a',
+                              {'token': token, 'messages': ROWS, 'provider': 'untrusted-provider', 'model': 'untrusted-model'})
         self.assertEqual(result['text'], '')
+
+    def test_registration_exposes_native_model_assignment_and_rpc(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location('neo_catalog_test', root / '__init__.py',
+                                                     submodule_search_locations=[str(root)])
+        assert spec is not None and spec.loader is not None
+        plugin = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: plugin}):
+            spec.loader.exec_module(plugin)
+            tasks, rpcs = [], {}
+            ctx = SimpleNamespace(
+                register_auxiliary_task=lambda key, **kw: tasks.append((key, kw)),
+                register_rpc=lambda key, fn: rpcs.update({key: fn}))
+            plugin.register(ctx)
+        self.assertEqual(tasks, [('neo_composer', {
+            'display_name': 'Neo Composer',
+            'description': 'Predict the next user message using your chosen Hermes model.'})])
+        self.assertIn('suggest', rpcs)
+        with self.assertRaises(ValueError):
+            rpcs['suggest']({}, session_id=None)
 
     def test_safety_guards_reject_upstream_values_before_storage(self):
         for value in ["I've restarted it", 'I saved the file', 'Tests all passed', 'It works now',

@@ -1,8 +1,12 @@
 """Bind generation to the real host context, never a credential or surrogate context."""
-from .dashboard.plugin_api import Store, generate
+from .dashboard.plugin_api import MODEL_TASK, Store, generate
 
 
 def register(ctx):
+    ctx.register_auxiliary_task(
+        MODEL_TASK, display_name='Neo Composer',
+        description='Predict the next user message using your chosen Hermes model.')
+
     def suggest(params, *, session_id=None, **kwargs):
         if not session_id:
             raise ValueError('A session is required')

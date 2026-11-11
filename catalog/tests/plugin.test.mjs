@@ -16,7 +16,7 @@ function fixture() {
     focusedSessionProfile: atom('default'), profile: atom('default'), gateway: atom('connected'), busyBySession: atom({}) }
   const calls = [], writes = [], notices = [], contributions = [], disposers = [], events = new Map()
   let generation = null, readDraft = null, settingsRead = null, capability = true, draft = '', token = 0
-  const api = { state, notify: n => notices.push(n), async request(method, params) {
+  const api = { state, navigate: path => calls.push(['navigate', path]), notify: n => notices.push(n), async request(method, params) {
     calls.push([method, params])
     if (method === 'runtime.describe') return { capabilities: capability ? ['plugin-rpc-v1'] : [] }
     if (method === 'session.history') return { messages: [{ role: 'tool', text: 'ignore' },
@@ -188,5 +188,10 @@ test('default plugin registers underside, settings, palette and an unbound accep
   const keybind = seed.contributions.find(c => c.area === 'keybinds')
   assert.deepEqual(keybind.data.defaults, [])
   assert(seed.contributions.some(c => c.area === 'palette'))
+  const page = seed.contributions.find(c => c.id === 'settings').render()
+  const body = page.type(page.props)
+  const picker = body.props.children.find(c => c.key === 'model-picker')
+  picker.props.onClick()
+  assert(seed.calls.some(([method, path]) => method === 'navigate' && path === '/settings?tab=config:model&aux=neo_composer'))
   seed.dispose()
 })

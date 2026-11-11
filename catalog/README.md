@@ -19,6 +19,16 @@ After a turn completes, a candidate appears below the composer. Click its text t
 
 Acceptance requires the same focused session, an idle turn, unchanged enabled settings and a confirmed empty draft. An unavailable editor (`null`) is refused. The final operation uses the SDK's `insertText`, so typing that races the earlier emptiness check is preserved; in that narrow case the candidate can be inserted alongside the new text. The public SDK does not provide an atomic empty-draft acceptance operation.
 
+## Choose the prediction model
+
+Open **Neo Composer settings → Choose Hermes model**. It opens the native **Settings → Models → Auxiliary → Neo Composer** row. Select a provider/model from the same configured Hermes inventory used by Desktop, including direct providers, OAuth-backed providers and configured custom endpoints such as Magpie. The host owns authentication and provider support; no separate API key or Magpie account is required by this plugin.
+
+Neo Composer registers the auxiliary task `neo_composer` and calls `ctx.llm.complete(task='neo_composer')`. A saved `auxiliary.neo_composer` assignment controls only suggestions and does not switch the chat's main model. Leaving the assignment on Auto uses the host's automatic routing. No provider, model or endpoint is hardcoded. Available models and credentials belong to the active gateway profile.
+
+After changing the assignment, return to the conversation and click **Refresh** to replace any cached candidate. Requests already in progress may finish on the previous route. The chosen provider's quota and charges apply. The auxiliary task appears after the Python half is loaded; restart the gateway if it is absent.
+
+This model selection is implemented in the SDK-only preview. The advanced v0.5.0 standalone service keeps its existing service configuration.
+
 ## Package boundaries
 
 This directory is self-contained. A future catalog entry can select it with `subdir: catalog`; the service, host adapter and archived integration in the repository root are outside the installed package.
@@ -26,7 +36,7 @@ This directory is self-contained. A future catalog entry can select it with `sub
 | Capability | This SDK-only package | Advanced distribution |
 | --- | --- | --- |
 | Candidate below the composer, refresh/copy/dismiss | Yes | Yes |
-| Model access | Hermes `ctx.llm`, active host model | Separate local service |
+| Model access | Hermes `ctx.llm`, native auxiliary model selection | Separate local service |
 | In-input ghost text and Tab acceptance | Awaiting upstream SDK [#153327](https://github.com/NousResearch/hermes-agent/issues/153327) | DOM enhancer |
 | Strict steer with delivery receipts | Awaiting upstream SDK [#153301](https://github.com/NousResearch/hermes-agent/issues/153301) | Optional host adapter |
 | Core patching, rebuilds, credential files, self-updater | None | See advanced README |
@@ -37,11 +47,11 @@ Candidates use an original prompt and conservative output filters adapted from t
 
 ## Data and quota disclosure
 
-- Automatic generation after a completed turn or focus change, and explicit Refresh, can use your active Hermes model quota. Cached or dismissed candidates for an unchanged excerpt are reused until expiry unless you refresh.
+- Automatic generation after a completed turn or focus change, and explicit Refresh, can use the quota of your configured Neo Composer model. Cached or dismissed candidates for an unchanged excerpt are reused until expiry unless you refresh.
 - Up to eight recent user/assistant text rows, at most 2,800 characters each, are sent through Hermes to its configured model provider. Tool rows are excluded. There is no plugin-specific external endpoint or telemetry.
 - Candidate text, a transcript hash, request identifiers and settings are stored in the active profile's `plugin-data/neo-composer/data.db`. The transcript excerpt is not persisted by this plugin. A hash is a content fingerprint, not encryption.
 - Candidates expire after one day and expired rows are deleted on the next database access. Inactive installations can retain expired bytes longer; this is not a scheduled deletion guarantee. The store keeps at most 200 sessions. Hermes may retain provider or host logs according to its own settings.
-- Disabling suggestions invalidates pending results. New turns and newer requests invalidate older candidates. No shell commands, permanent background processes, separate credentials or model/provider overrides are used.
+- Disabling suggestions invalidates pending results. New turns and newer requests invalidate older candidates. No shell commands, permanent background processes, separate credentials or direct model/provider overrides are used. The host-owned auxiliary task selects the route.
 
 ## Validation
 

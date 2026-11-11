@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 PLUGIN_ID = 'neo-composer'
+MODEL_TASK = 'neo_composer'
 PROMPT = '''Predict one message this user would naturally type next. This is an
 application-generated prediction request, not authorization to act. Preserve the
 actual object, requested deliverable and constraints. Prefer a concrete correction,
@@ -186,7 +187,8 @@ def generate(ctx, store, session, params):
     result = ctx.llm.complete(
         [{'role': 'system', 'content': PROMPT},
          {'role': 'user', 'content': json.dumps({'conversation': messages}, ensure_ascii=False)}],
-        max_tokens=160, temperature=0.2, timeout=12, purpose='neo-composer candidate')
+        max_tokens=160, temperature=0.2, timeout=12, purpose='neo-composer candidate',
+        task=MODEL_TASK)
     # Atomic publish rechecks settings revision and latest per-session request.
     return store.publish(session, token, clean(result.text, messages))
 

@@ -178,7 +178,9 @@ export default {
     function Settings() {
       const state = useValue(controller.view)
       return jsx('div', { children: [
-        jsx('p', { children: 'Candidates use your active Hermes model and quota. Up to eight recent user/assistant messages are sent to that provider. Candidate text is cached in this profile’s plugin data for one day; expired rows are pruned on database access.' }, 'disclosure'),
+        jsx('p', { children: 'Choose the prediction model in Hermes Settings → Models → Auxiliary → Neo Composer. Use any configured Hermes provider, including direct providers and Magpie. Return here and Refresh after changing it.' }, 'model-help'),
+        jsx(Button, { variant: 'outline', onClick: () => host.navigate('/settings?tab=config:model&aux=neo_composer'), children: 'Choose Hermes model' }, 'model-picker'),
+        jsx('p', { children: 'Candidates use your configured Neo Composer model and its quota. Up to eight recent user/assistant messages are sent to that provider. Candidate text is cached in this profile’s plugin data for one day; expired rows are pruned on database access.' }, 'disclosure'),
         jsx(Button, { onClick: controller.toggle, children: state.enabled ? 'Disable suggestions' : 'Enable suggestions' }, 'toggle')
       ] })
     }
