@@ -164,10 +164,38 @@ def _owned(root: Path) -> dict:
     installed = manifest.get('installed')
     if not isinstance(installed, dict) or not set(installed).issubset(_known_paths()):
         raise Refuse('ownership manifest missing installed digests; inspect older installation manually')
+    reverted = []
     for rel, expected in installed.items():
         if _hash(_safe(root, rel)) != expected:
-            raise Refuse(f'{rel}: source changed since install (ownership digest mismatch)')
-    return installed
+            if not _reverted_by_host_update(root, rel):
+                raise Refuse(f'{rel}: source changed since install (ownership digest mismatch)')
+            reverted.append(rel)
+    # A Hermes update (`hermes update --keep-stash`, the desktop updater's mode) stashes our edits
+    # and checks out clean upstream files. Those files are provably upstream (byte-equal to git
+    # HEAD, no marker), so ownership of them lapses and the plan simply re-applies on new anchors.
+    return {rel: digest for rel, digest in installed.items() if rel not in reverted}
+
+
+def _git_head_blob(root: Path, rel: str):
+    import subprocess
+    try:
+        r = subprocess.run(['git', '-C', str(root), 'show', f'HEAD:{rel}'], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _reverted_by_host_update(root: Path, rel: str) -> bool:
+    """True when a host update put the pristine upstream file back: it is tracked, byte-equal to
+    git HEAD and carries no adapter marker. Anything else (hand edits, partial state) stays refused."""
+    path = root / rel
+    if not path.is_file():
+        return False
+    data = path.read_bytes()
+    if MARK.encode() in data:
+        return False
+    head = _git_head_blob(root, rel)
+    return head is not None and head == data
 
 
 def plan_changes(root: Path, frontend: str = 'auto') -> dict[str, str]:

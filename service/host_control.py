@@ -165,6 +165,23 @@ class HostControl:
         self._safe(RECEIPT).unlink()
         return result
 
+    def reapply_after_update(self):
+        """Re-apply a consented one-click install that a Hermes update reverted.
+
+        `hermes update` (desktop updater: --keep-stash) stashes the adapter's tracked edits, so
+        Ctrl+Enter loses `steerStrict` after every update. Only acts when a click-install receipt
+        exists (the user already chose to install) and the adapter plan is pending again; the
+        installer still refuses anything that is not provably pristine upstream.
+        """
+        if not self._receipt():
+            return None
+        try:
+            if not self._view()['pending']:
+                return None
+            return self.run('install')
+        except (ControlError, self.installer.Refuse) as exc:
+            return {'action': 'refused', 'reason': str(exc)}
+
     def run(self, action):
         if action not in {'check', 'status', 'install', 'rollback'}:
             raise ControlError('unknown host-adapter action', 404)

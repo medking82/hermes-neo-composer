@@ -340,6 +340,19 @@ def make_handler(cfg, predictor):
         spec.loader.exec_module(module)
     control_module = sys.modules[module_name]
     control = control_module.HostControl(cfg)
+    if cfg.get('auto_reapply', True):
+        def reapply_loop():
+            time.sleep(cfg.get('auto_reapply_delay', 20))  # let startup and user clicks settle first
+            while True:
+                try:
+                    result = control.reapply_after_update()
+                    if result:
+                        log('host adapter re-apply after Hermes update: %s' % (
+                            result.get('action') or result.get('reason')))
+                except Exception as exc:  # never take the suggest service down
+                    log('host adapter re-apply failed: %s' % exc)
+                time.sleep(cfg.get('auto_reapply_interval', 300))
+        threading.Thread(target=reapply_loop, name='neo-reapply', daemon=True).start()
     extra_origins = set(cfg['cors'])
     control_origins = {'null', 'http://localhost:5174', 'http://127.0.0.1:5174'} | {
         origin for origin in cfg.get('control_origins', []) if origin != '*'}

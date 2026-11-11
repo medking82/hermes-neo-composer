@@ -84,6 +84,33 @@ class ControlHttpTests(unittest.TestCase):
             self.assertFalse((root / 'gateway/neo_composer_adapter.py').exists())
             self.assertEqual({rel: (root / rel).read_bytes() for rel in before}, before)
 
+    def test_reapply_after_hermes_update_restores_consented_install(self):
+        import subprocess
+        from host_control import HostControl
+
+        def git(root, *args):
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                            '-c', 'core.autocrlf=false', *args], check=True, capture_output=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_host(root)
+            git(root, 'init', '-q')
+            git(root, 'add', '-A')
+            git(root, 'commit', '-qm', 'upstream')
+            cfg = ns.load_config({})
+            cfg.update(hermes_root=str(root))
+            control = HostControl(cfg)
+            self.assertIsNone(control.reapply_after_update())  # never installed: no consent, no action
+            control.run('install')
+            self.assertIsNone(control.reapply_after_update())  # nothing pending
+            git(root, 'stash', 'push', '-q')  # what `hermes update --keep-stash` does
+            self.assertNotIn('neo-composer', (root / 'gateway/session_controls.py').read_text())
+            state = control.reapply_after_update()
+            assert state is not None
+            self.assertEqual(state['action'], 'installed')
+            self.assertIn('neo-composer', (root / 'gateway/session_controls.py').read_text())
+
     def test_origin_token_host_and_input_gates_preserve_service_auth(self):
         base = self.start(token='prediction', control_token='admin', cors=['*'], control_origins=['*'])
         auth = {'Authorization': 'Bearer admin', 'Origin': 'null'}

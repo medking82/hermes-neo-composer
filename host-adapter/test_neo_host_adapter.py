@@ -101,6 +101,36 @@ def test_refuses_partial_application(host):
         h.install(host)
 
 
+def _git(root, *args):
+    subprocess.run(['git', '-C', str(root), *args], check=True, capture_output=True)
+
+
+def test_reinstalls_after_host_update_stashed_edits(host):
+    _git(host, 'init', '-q')
+    _git(host, '-c', 'core.autocrlf=false', 'add', '-A')
+    _git(host, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'upstream')
+    h.install(host)
+    # `hermes update --keep-stash`: tracked edits stashed, untracked adapter files left in place.
+    _git(host, '-c', 'user.name=t', '-c', 'user.email=t@t', 'stash', 'push', '-q')
+    assert h.MARK not in (host / 'gateway/session_controls.py').read_text()
+    assert sorted(h.plan_changes(host)) == ['agent/turn_iteration_prep.py', 'gateway/session_controls.py']
+    assert h.install(host)['status'] == 'installed'
+    assert h.MARK in (host / 'gateway/session_controls.py').read_text()
+    assert h.install(host)['status'] == 'unchanged'
+
+
+def test_hand_edit_after_install_still_refused(host):
+    _git(host, 'init', '-q')
+    _git(host, '-c', 'core.autocrlf=false', 'add', '-A')
+    _git(host, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'upstream')
+    h.install(host)
+    _git(host, '-c', 'user.name=t', '-c', 'user.email=t@t', 'stash', 'push', '-q')
+    f = host / 'gateway/session_controls.py'
+    f.write_text(f.read_text() + '# local edit\n')
+    with pytest.raises(h.Refuse, match='digest mismatch'):
+        h.plan_changes(host)
+
+
 def test_failed_install_rolls_back(host, monkeypatch):
     before = snapshot(host)
     real = h._write
