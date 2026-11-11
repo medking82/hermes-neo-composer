@@ -138,6 +138,23 @@ class ControlHttpTests(unittest.TestCase):
         self.assertEqual((code, headers.get('Access-Control-Allow-Origin')), (204, 'null'))
         self.assertEqual(self.request(base, '/v1/host-adapter/install', headers={'Origin': 'https://evil.example'}, method='OPTIONS')[0], 403)
 
+    def test_restart_has_same_auth_confirmation_and_method_gates(self):
+        base = self.start(token='secret')
+        route = '/v1/host-adapter/restart'
+        auth = {'Authorization': 'Bearer secret'}
+        self.assertEqual(self.request(base, route, {'confirm': True})[0], 401)
+        self.assertEqual(self.request(base, route, headers=auth)[0], 405)
+        self.assertEqual(self.request(base, route, {}, auth)[0], 400)
+        self.assertEqual(self.request(base, route, {'confirm': True, 'pid': 1}, auth)[0], 400)
+        self.assertEqual(self.request(base, route, {'confirm': True},
+                                     {**auth, 'Origin': 'https://evil.example'})[0], 403)
+        from unittest.mock import patch
+        import sys
+        with patch.object(sys.modules['_neo_host_control'].HostControl, 'run',
+                          return_value={'action': 'restart_scheduled'}) as run:
+            self.assertEqual(self.request(base, route, {'confirm': True}, auth)[2]['action'], 'restart_scheduled')
+            run.assert_called_once_with('restart')
+
     def test_nonloopback_bind_cannot_mutate_even_with_control_token(self):
         base = self.start(token='secret', host='0.0.0.0')
         self.assertEqual(self.request(base, '/v1/host-adapter/install', {'confirm': True},

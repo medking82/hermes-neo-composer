@@ -74,7 +74,7 @@ test('settings exposes check/install/rollback, and mount does not install', asyn
   const walk = n => { if (n && typeof n === 'object') { nodes.push(n); for (const v of Object.values(n.p || {})) (Array.isArray(v) ? v : [v]).forEach(x => { if (x && typeof x === 'object') walk(x) }) } }
   walk(tree)
   const buttons = nodes.filter(n => n.t === 'button')
-  assert.deepEqual(buttons.map(n => n.p.children), ['檢查主機介面', '安裝主機 Adapter', '回復上次安裝'])
+  assert.deepEqual(buttons.map(n => n.p.children), ['檢查主機介面', '安裝主機 Adapter', '回復上次安裝', '完成安裝並重啟'])
   assert.equal(calls.length, 0)
   await buttons[1].p.onClick()
   assert.match(calls[0][0], /host-adapter\/install$/)

@@ -33,6 +33,25 @@ globalThis.fetch = async (url, init) => {
 
 const mod = await import('./neo-composer/plugin.js')
 
+test('restart button is present, guarded until a build is checked, and posts confirmation', async () => {
+  const tree = mod.HostAdapterSettings({ settings: {}, files: null })
+  const buttons = tree.p.children.flatMap(n => n?.p?.children || []).filter(n => n?.t === 'button')
+  const restart = buttons.find(n => n.p.children === '完成安裝並重啟')
+  assert.ok(restart)
+  assert.equal(restart.p.disabled, true)
+  let sent
+  const client = mod.createHostAdapterClient({
+    settings: () => ({ url: 'http://127.0.0.1:3460', controlToken: 'local-test' }),
+    fetchImpl: async (url, init) => { sent = { url, init }; return { ok: true, json: async () => ({ action: 'restart_scheduled' }) } }
+  })
+  await client.run('restart')
+  assert.equal(sent.init.method, 'POST')
+  assert.deepEqual(JSON.parse(sent.init.body), { confirm: true })
+  assert.match(sent.url, /host-adapter\/restart$/)
+  assert.match(mod.describeHostAdapter({ action: 'restart_scheduled' }), /已排定/)
+  assert.match(mod.describeHostAdapter({ desktop: { restart_error: 'locked' } }), /locked/)
+})
+
 test('Hermes mode uses bounded host RPC without service credentials or HTTP fallback', async () => {
   const calls = []
   const c = mod.createController({

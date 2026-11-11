@@ -35,7 +35,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = '0.5.0'
+VERSION = '0.5.2'
 CONTRACT = 'neo-suggest-v1'
 HERE = Path(__file__).resolve().parent
 PROMPT = (HERE / 'prediction.txt').read_text(encoding='utf-8')
@@ -425,9 +425,9 @@ def make_handler(cfg, predictor):
             if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
                 return self._send(401, {'error': 'unauthorized'}, origin)
             action = self.path.removeprefix('/v1/host-adapter/')
-            if action not in {'check', 'status', 'install', 'rollback'}:
+            if action not in {'check', 'status', 'install', 'rollback', 'restart'}:
                 return self._send(404, {'error': 'unknown host-adapter action'}, origin)
-            mutation = action in {'install', 'rollback'}
+            mutation = action in {'install', 'rollback', 'restart'}
             if self.command != ('POST' if mutation else 'GET'):
                 return self._send(405, {'error': 'method not allowed'}, origin)
             if mutation:

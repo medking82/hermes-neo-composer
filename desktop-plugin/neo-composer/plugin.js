@@ -12,7 +12,7 @@ import { COMPOSER_AREAS, KEYBINDS_AREA, PALETTE_AREA, host } from '@hermes/plugi
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-export const VERSION = '0.5.1'
+export const VERSION = '0.5.2'
 export const EDITOR_SELECTOR = "[data-slot='composer-rich-input']"
 export const DEFAULTS = { backend: 'service', url: 'http://127.0.0.1:3460', token: '', controlToken: '', enabled: true, inline: true, steerKey: 'ctrl+enter', enterQueues: true }
 const ORIGINAL = 'data-neo-original-placeholder'
@@ -246,7 +246,7 @@ function Pill({ ctrl, accept, copy }) {
 export function createHostAdapterClient({ fetchImpl, settings, files }) {
   return {
     async run(action) {
-      if (!['check', 'status', 'install', 'rollback'].includes(action)) throw new Error('unknown host-adapter action')
+      if (!['check', 'status', 'install', 'rollback', 'restart'].includes(action)) throw new Error('unknown host-adapter action')
       const s = settings()
       let base
       try { base = new URL(s.url) } catch { throw new Error('主機安裝僅支援 loopback 本機服務 URL') }
@@ -260,7 +260,7 @@ export function createHostAdapterClient({ fetchImpl, settings, files }) {
         if (credential.ok) token = JSON.parse(credential.text).token
       }
       if (!token) throw new Error('請先設定主機控制 Token 或服務 Token；主機安裝必須驗證')
-      const mutation = action === 'install' || action === 'rollback'
+      const mutation = ['install', 'rollback', 'restart'].includes(action)
       const response = await fetchImpl(`${base.origin}/v1/host-adapter/${action}`, {
         method: mutation ? 'POST' : 'GET',
         headers: { Authorization: `Bearer ${token}`, ...(mutation ? { 'Content-Type': 'application/json' } : {}) },
@@ -286,7 +286,9 @@ export async function probeHostAdapter(runtime) {
 }
 
 export function describeHostAdapter(state) {
-  if (state.desktop?.state === 'waiting_for_exit') return 'Windows 桌面版已建置並驗證。請結束 Hermes（含系統匣）；服務會自動套用並重新開啟。'
+  if (state.action === 'restart_scheduled') return '已排定重新啟動，service 將關閉 Desktop、套用並重新開啟。'
+  if (state.desktop?.restart_error) return `重新啟動未完成：${state.desktop.restart_error}`
+  if (state.desktop?.state === 'waiting_for_exit') return 'Windows 桌面版已建置並驗證。可按「完成安裝並重啟」套用。'
   if (state.desktop?.state === 'installed') return 'Windows 桌面版已套用；執行中能力仍以 Renderer SDK 與 Gateway 檢查為準。'
   if (['failed', 'promotion_failed'].includes(state.desktop?.state)) return `安裝未完成：${state.desktop.error}；建置記錄：${state.desktop.log || ''}`
   const backend = state.backend?.source_applied ? '後端原始碼已套用；Gateway 仍須重新啟動' : '後端原始碼尚未套用'
@@ -302,14 +304,16 @@ export function HostAdapterSettings({ settings, files }) {
   const [runtime, setRuntime] = useState('執行中能力尚未確認')
   const [working, setWorking] = useState(false)
   const [canRollback, setCanRollback] = useState(false)
+  const [canRestart, setCanRestart] = useState(false)
   const action = async name => {
     setWorking(true)
-    setStatus(name === 'install' ? '正在備份、安裝與建置 Windows 桌面版，請保持 Hermes 開啟…' : name === 'rollback' ? '正在回復上次安裝…' : '正在檢查…')
+    setStatus(name === 'install' ? '正在備份、安裝與建置 Windows 桌面版，請保持 Hermes 開啟…' : name === 'rollback' ? '正在回復上次安裝…' : name === 'restart' ? '正在安排完成安裝並重啟…' : '正在檢查…')
     try {
       const client = createHostAdapterClient({ fetchImpl: (...args) => fetch(...args), settings: () => settings, files })
       const result = await client.run(name)
       setStatus(`${result.root ? result.root + ' · ' : ''}${describeHostAdapter(result)}`)
       setCanRollback(!!result.rollback_available)
+      setCanRestart(result.desktop?.state === 'waiting_for_exit' && result.action !== 'restart_scheduled')
       const caps = await probeHostAdapter(host)
       setRuntime(`Renderer SDK：${caps.sdk ? '已提供' : '缺少'} · ${caps.reason}`)
     } catch (err) { setStatus(`主機操作未完成：${String(err?.message || err)}`) }
@@ -322,10 +326,10 @@ export function HostAdapterSettings({ settings, files }) {
   return jsxs('div', { className: 'flex flex-col gap-2 border-t border-(--ui-border) pt-3', children: [
     jsx('div', { className: 'font-medium', children: '選用：嚴格 Steer 主機 Adapter' }),
     jsx('p', { className: 'text-(--ui-text-tertiary)', children: '點擊安裝會備份並修改本機已安裝的 Hermes 原始碼。相容性依結構與能力檢查，不依 Hermes 版本號。' }),
-    jsxs('div', { className: 'flex flex-wrap gap-2', children: [button('檢查主機介面', 'check'), button('安裝主機 Adapter', 'install'), button('回復上次安裝', 'rollback', !canRollback)] }),
+    jsxs('div', { className: 'flex flex-wrap gap-2', children: [button('檢查主機介面', 'check'), button('安裝主機 Adapter', 'install'), button('回復上次安裝', 'rollback', !canRollback), button('完成安裝並重啟', 'restart', !canRestart)] }),
     jsx('p', { role: 'status', className: 'break-all text-(--ui-text-secondary)', children: status }),
     jsx('p', { className: 'text-(--ui-text-tertiary)', children: runtime }),
-    jsx('p', { className: 'text-(--ui-text-tertiary)', children: 'Windows 安裝會自動備份、套用 Adapter 並在本機建置桌面版，不需要 WSL。顯示建置完成後，請結束 Hermes（含系統匣）；服務會套用並自動重新開啟。Token 自動設定，框內建議不需要此 Adapter。' })
+    jsx('p', { className: 'text-(--ui-text-tertiary)', children: 'Windows 安裝會自動備份、套用 Adapter 並在本機建置桌面版，不需要 WSL。先按「檢查主機介面」或完成建置，再按「完成安裝並重啟」。這會強制關閉此安裝的 Desktop 與其子程序，結束進行中的工作；請先儲存草稿。service 會套用並自動重新開啟。Token 自動設定，框內建議不需要此 Adapter。' })
   ] })
 }
 

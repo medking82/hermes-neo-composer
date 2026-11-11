@@ -14,7 +14,7 @@ jobs:
         with:
           node-version: '22'
       - name: Service unit tests
-        run: cd service && python3 -m unittest -v test_neo_suggest
+        run: cd service && python3 -m unittest discover -v
       - name: Desktop plugin tests
         run: node --check desktop-plugin/neo-composer/plugin.js && node --test desktop-plugin/*.test.mjs
       - name: Catalog package tests

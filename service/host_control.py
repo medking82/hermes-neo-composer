@@ -53,6 +53,7 @@ class HostControl:
     def __init__(self, cfg):
         self.root = installed_root(cfg)
         self.mutex = threading.Lock()
+        self.restart_pending = False
         self.installer = load_installer()
         name = '_neo_desktop_install'
         if name not in sys.modules:
@@ -182,14 +183,41 @@ class HostControl:
         except (ControlError, self.installer.Refuse) as exc:
             return {'action': 'refused', 'reason': str(exc)}
 
+    def _restart_worker(self):
+        # Allow the HTTP acknowledgement and UI status to arrive before shutdown.
+        threading.Event().wait(2)
+        with self.mutex:
+            try:
+                with self._mutation(), self.desktop.custody():
+                    self.desktop.restart()
+            except Exception as exc:
+                state = self.desktop.read()
+                self.desktop.write({**state, 'restart_error': str(exc)})
+            finally:
+                self.restart_pending = False
+
     def run(self, action):
-        if action not in {'check', 'status', 'install', 'rollback'}:
+        if action not in {'check', 'status', 'install', 'rollback', 'restart'}:
             raise ControlError('unknown host-adapter action', 404)
         if not self.mutex.acquire(blocking=False):
             raise ControlError('host-adapter operation in progress')
         try:
             self._validate()
             result = None
+            if action == 'restart':
+                if self.restart_pending:
+                    raise ControlError('Desktop restart already scheduled')
+                with self._mutation(), self.desktop.custody():
+                    if not self.desktop.available:
+                        raise ControlError('automatic restart requires the installed Windows Desktop', 422)
+                    self.desktop.validate_handoff()
+                self.restart_pending = True
+                try:
+                    threading.Thread(target=self._restart_worker, name='neo-desktop-restart', daemon=True).start()
+                except Exception:
+                    self.restart_pending = False
+                    raise
+                return {'action': 'restart_scheduled', 'desktop': self.desktop.read()}
             if action in {'install', 'rollback'}:
                 with self._mutation(), self.desktop.custody():
                     if action == 'install':

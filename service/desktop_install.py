@@ -197,10 +197,10 @@ class DesktopInstall:
                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         return any(row and row[0].lower() == 'hermes.exe' for row in csv.reader(result.stdout.splitlines()))
 
-    def promote(self):
+    def validate_handoff(self):
         state = self.read()
-        if state.get('state') != 'waiting_for_exit' or self.running():
-            return False
+        if state.get('state') != 'waiting_for_exit':
+            raise RuntimeError('no verified Desktop build waiting for restart')
         rollback = state['operation'] == 'rollback'
         if not rollback:
             for relative, expected in state.get('source_files', {}).items():
@@ -213,6 +213,54 @@ class DesktopInstall:
         if self.tree_hash(source) != wanted or self.tree_hash(self.resources) != current:
             raise RuntimeError('Desktop resources changed after staging; refusing promotion')
         self.verify(source)
+        if (self.root / '.neo-desktop-swap-old').exists():
+            raise RuntimeError('incomplete Desktop swap requires recovery')
+        return state, source
+
+    def stop_desktop(self):
+        # Scope termination to this installation's Electron main process. Never
+        # kill by image name: other installations and their gateways are unrelated.
+        executable = str(self.resources.parent / 'Hermes.exe').replace("'", "''")
+        script = ("$ErrorActionPreference='Stop'; "
+                  f"$exe='{executable}'; "
+                  "$apps=@(Get-CimInstance Win32_Process -Filter \"Name='Hermes.exe'\" | "
+                  "Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -notmatch '--type=' }); "
+                  "foreach($app in $apps) { "
+                  "& taskkill.exe /PID $app.ProcessId /T /F | Out-Null; "
+                  "if($LASTEXITCODE -ne 0) { throw 'Desktop shutdown failed' } }")
+        subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                       capture_output=True, text=True, check=True, timeout=30,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        for _ in range(60):
+            if not self.running():
+                return
+            threading.Event().wait(0.5)
+        raise RuntimeError('Desktop did not fully exit; resources were not replaced')
+
+    def restart(self):
+        if not self.available:
+            raise RuntimeError('automatic restart requires the installed Windows Desktop')
+        self.validate_handoff()  # refuse drift before closing any process
+        self.stop_desktop()
+        try:
+            if not self.promote():
+                raise RuntimeError('Desktop restarted before handoff; resources were not replaced')
+        except Exception:
+            # Promotion restores the original resources if final verification fails.
+            if not self.running():
+                self.launch()
+            raise
+
+    def launch(self):
+        subprocess.Popen([str(self.resources.parent / 'Hermes.exe')], cwd=self.root,
+                         creationflags=getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
+
+    def promote(self):
+        state = self.read()
+        if state.get('state') != 'waiting_for_exit' or self.running():
+            return False
+        state, source = self.validate_handoff()
+        rollback = state['operation'] == 'rollback'
         saved = self.root / '.neo-desktop-swap-old'
         if saved.exists():
             raise RuntimeError('incomplete Desktop swap requires recovery')
@@ -231,10 +279,10 @@ class DesktopInstall:
             if self.backup.exists():
                 shutil.rmtree(self.backup)
             saved.rename(self.backup)
+        state.pop('restart_error', None)
         self.write({**state, 'state': 'rolled_back' if rollback else 'installed'})
         shutil.rmtree(self.stage, ignore_errors=True)
-        subprocess.Popen([str(self.resources.parent / 'Hermes.exe')], cwd=self.root,
-                         creationflags=getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
+        self.launch()
         return True
 
     def monitor(self, mutex):
