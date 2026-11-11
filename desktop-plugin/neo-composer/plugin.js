@@ -12,7 +12,7 @@ import { COMPOSER_AREAS, KEYBINDS_AREA, PALETTE_AREA, host } from '@hermes/plugi
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-export const VERSION = '0.5.0'
+export const VERSION = '0.5.1'
 export const EDITOR_SELECTOR = "[data-slot='composer-rich-input']"
 export const DEFAULTS = { backend: 'service', url: 'http://127.0.0.1:3460', token: '', controlToken: '', enabled: true, inline: true, steerKey: 'ctrl+enter', enterQueues: true }
 const ORIGINAL = 'data-neo-original-placeholder'
