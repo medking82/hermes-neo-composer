@@ -19,6 +19,35 @@ The v0.4 code and README are kept under `legacy/v0.4/` for reference only.
 The preview displays suggestions below the composer; in-input ghost text and strict steer await upstream SDK issues [#153327](https://github.com/NousResearch/hermes-agent/issues/153327) and [#153301](https://github.com/NousResearch/hermes-agent/issues/153301). Marketplace submission remains paused. See its README for installation, quota/data disclosures, compatibility and verification limits. The advanced distribution documented below remains available.
 
 
+## Advanced Desktop: choose Hermes models
+
+The advanced UI can use either **Hermes models** or the **standalone service**, preserving
+in-box ghost text, Tab acceptance and strict steer in both modes. Install/update its
+Python backend and Desktop UI together with Hermes' Python environment:
+
+```sh
+python deploy/install_desktop.py
+```
+
+The installer enables the backend using the official CLI (live gateway reload when
+supported), and installs only the advanced Desktop UI. It refuses an existing unified
+catalog package rather than overwriting its UI. It preserves service credentials and
+host-adapter receipts. Re-run after pulling updates; this does not rebuild Hermes.
+
+In Neo Composer settings choose **建議模型來源 → Hermes 已設定的模型**, then
+**選擇 Hermes 模型** opens **Settings → Models → Auxiliary → Neo Composer**.
+Select any provider/model already supported by Hermes. **Auto** follows Hermes' default
+auxiliary routing. Use **重新產生建議** after changing models. **測試連線** in Hermes mode
+makes one real prediction call with a small synthetic conversation (uses model quota).
+
+Hermes mode sends at most eight recent user/assistant messages (2800 characters per
+row) through the gateway's `plugin.neo-composer.predict` RPC to `ctx.llm` with task
+`neo_composer`; credentials stay with Hermes. Cached candidate text remains in the
+profile's plugin SQLite store for up to a day. Profile mismatches and missing RPCs
+show errors without silently switching providers. Existing installations retain service
+mode until changed in settings. The standalone service still supplies host-adapter
+installation/control and remains available to external clients such as Forma.
+
 ## Interaction (Desktop)
 
 - When the focused chat finishes a turn, the plugin reads the session history, asks the service, and shows one suggestion.

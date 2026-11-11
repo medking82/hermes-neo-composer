@@ -14,7 +14,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 export const VERSION = '0.5.0'
 export const EDITOR_SELECTOR = "[data-slot='composer-rich-input']"
-export const DEFAULTS = { url: 'http://127.0.0.1:3460', token: '', controlToken: '', enabled: true, inline: true, steerKey: 'ctrl+enter', enterQueues: true }
+export const DEFAULTS = { backend: 'service', url: 'http://127.0.0.1:3460', token: '', controlToken: '', enabled: true, inline: true, steerKey: 'ctrl+enter', enterQueues: true }
 const ORIGINAL = 'data-neo-original-placeholder'
 
 // ------------------------------------------------------------------ pure helpers
@@ -36,7 +36,7 @@ export function isEditorEmpty(el) {
   return (el.textContent || '').replace(/\u200b/g, '').trim() === ''
 }
 
-export function createController({ fetchImpl, request, storage, now = () => Date.now() }) {
+export function createController({ fetchImpl, request, storage, context = () => ({}), now = () => Date.now() }) {
   const listeners = new Set()
   let state = { sessionId: null, suggestion: null, status: 'idle', error: null, filled: false }
   let seq = 0
@@ -49,26 +49,42 @@ export function createController({ fetchImpl, request, storage, now = () => Date
   async function refresh(sessionId) {
     const s = settings()
     const my = ++seq
+    const identity = JSON.stringify(context())
+    const current = () => my === seq && identity === JSON.stringify(context()) && s.backend === settings().backend
     if (!s.enabled || !sessionId) return set({ sessionId, suggestion: null, status: 'idle', filled: false })
     set({ sessionId, suggestion: null, status: 'loading', error: null, filled: false })
     try {
+      const address = context()
+      if (s.backend === 'hermes' && address.profile !== address.gatewayProfile) {
+        throw new Error('請切換到此工作階段的 Hermes profile 再產生建議')
+      }
       const history = await request('session.history', { session_id: sessionId })
       const messages = toServiceMessages(history)
-      if (my !== seq) return
+      if (!current()) return
       if (!messages.length || messages[messages.length - 1].role !== 'assistant') {
         return set({ status: 'idle' })
       }
-      const headers = { 'Content-Type': 'application/json' }
-      if (s.token) headers.Authorization = `Bearer ${s.token}`
-      const resp = await fetchImpl(`${s.url.replace(/\/$/, '')}/v1/suggest`, {
-        method: 'POST', headers, body: JSON.stringify({ messages, client: `hermes-desktop/${VERSION}` })
-      })
-      const body = await resp.json().catch(() => ({}))
-      if (my !== seq) return
-      if (!resp.ok) return set({ status: 'error', error: body.error || `HTTP ${resp.status}` })
+      let body
+      if (s.backend === 'hermes') {
+        // Host resolves auxiliary.neo_composer and owns all provider credentials.
+        body = await request('plugin.neo-composer.predict', {
+          session_id: sessionId,
+          messages: messages.slice(-8).map(row => ({ ...row, content: row.content.slice(-2800) }))
+        })
+      } else {
+        const headers = { 'Content-Type': 'application/json' }
+        if (s.token) headers.Authorization = `Bearer ${s.token}`
+        const resp = await fetchImpl(`${s.url.replace(/\/$/, '')}/v1/suggest`, {
+          method: 'POST', headers, body: JSON.stringify({ messages, client: `hermes-desktop/${VERSION}` })
+        })
+        body = await resp.json().catch(() => ({}))
+        if (!current()) return
+        if (!resp.ok) return set({ status: 'error', error: body.error || `HTTP ${resp.status}` })
+      }
+      if (!current()) return
       set({ suggestion: body.suggestion || null, status: body.suggestion ? 'ready' : body.status || 'empty', at: now() })
     } catch (err) {
-      if (my === seq) set({ status: 'error', error: String(err?.message || err) })
+      if (current()) set({ status: 'error', error: String(err?.message || err) })
     }
   }
 
@@ -316,7 +332,9 @@ export function HostAdapterSettings({ settings, files }) {
 function Settings({ ctrl, storage, files }) {
   const [v, setV] = useState(ctrl.settings())
   const [health, setHealth] = useState('')
-  const save = next => { setV(next); storage.set('settings', next) }
+  const save = next => {
+    setV(next); storage.set('settings', next); ctrl.clear()
+  }
   const field = (label, key, type = 'text') => jsxs('label', {
     className: 'flex flex-col gap-1',
     children: [jsx('span', { className: 'text-(--ui-text-tertiary)', children: label }),
@@ -330,6 +348,19 @@ function Settings({ ctrl, storage, files }) {
   })
   const test = async () => {
     try {
+      if (v.backend === 'hermes') {
+        const runtime = await host.request('runtime.describe')
+        if (!runtime.capabilities?.includes('plugin-rpc-v1')) throw new Error('Gateway 不支援 plugin RPC')
+        const sid = host.state.focusedSessionId.get()
+        if (!sid) throw new Error('請先選擇工作階段')
+        if (host.state.focusedSessionProfile.get() !== host.state.profile.get()) throw new Error('請先啟用此工作階段的 profile')
+        const result = await host.request('plugin.neo-composer.predict', { session_id: sid, messages: [
+          { role: 'user', content: '請說明 Hermes 模型設定在哪裡。' },
+          { role: 'assistant', content: '可以在 Settings 的 Models 頁面設定。' }
+        ] })
+        setHealth(`Hermes 模型呼叫完成 · ${result.status}${result.suggestion ? ' · ' + result.suggestion : ''}`)
+        return
+      }
       const r = await fetch(`${v.url.replace(/\/$/, '')}/healthz`)
       const b = await r.json()
       setHealth(`OK ${b.version} · ${b.live_model || b.models?.join(',')}${b.last_error ? ' · ' + b.last_error : ''}`)
@@ -343,6 +374,19 @@ function Settings({ ctrl, storage, files }) {
       check('框內灰字（Tab 填入）', 'inline'),
       check('忙碌時 Enter 排隊（Shift+Enter 換行）', 'enterQueues'),
       field('忙碌時 Steer 快捷鍵（例：ctrl+enter）', 'steerKey'),
+      jsxs('label', { className: 'flex flex-col gap-1', children: [
+        jsx('span', { children: '建議模型來源' }),
+        jsxs('select', { value: v.backend, onChange: e => save({ ...v, backend: e.target.value }), children: [
+          jsx('option', { value: 'hermes', children: 'Hermes 已設定的模型' }),
+          jsx('option', { value: 'service', children: '獨立 Neo Suggest service' })
+        ] })
+      ] }),
+      jsx('button', { type: 'button', onClick: () => host.navigate('/settings?tab=config:model&aux=neo_composer'), children: '選擇 Hermes 模型' }),
+      jsx('p', { children: 'Hermes 模式使用 Auxiliary → Neo Composer，最多傳送 8 則對話並使用該模型額度；憑證由 Hermes 管理。模型變更後請重新產生建議。service 仍提供主機 Adapter 控制。' }),
+      jsx('button', { type: 'button', onClick: () => {
+        const sid = host.state.focusedSessionId.get()
+        if (!(host.state.busyBySession.get() || {})[sid]) void ctrl.refresh(sid)
+      }, children: '重新產生建議' }),
       field('Suggest service URL', 'url'),
       field('Token（建議服務；主機控制未另設時共用）', 'token', 'password'),
       field('主機控制 Token（選填；NEO_CONTROL_TOKEN）', 'controlToken', 'password'),
@@ -360,7 +404,13 @@ export default {
   id: 'neo-composer',
   name: 'Neo Composer',
   register(ctx) {
-    const ctrl = createController({ fetchImpl: (...a) => fetch(...a), request: host.request, storage: ctx.storage })
+    const context = () => ({
+      session: host.state.focusedSessionId.get(),
+      profile: host.state.focusedSessionProfile?.get(),
+      gatewayProfile: host.state.profile?.get(),
+      gateway: host.state.gateway?.get()
+    })
+    const ctrl = createController({ fetchImpl: (...a) => fetch(...a), request: host.request, storage: ctx.storage, context })
     const accept = async () => {
       const { suggestion: text, sessionId } = ctrl.get()
       if (!text || sessionId !== host.state.focusedSessionId.get()) return false
@@ -401,6 +451,9 @@ export default {
       host.state.busyBySession.listen(applyQueue),
       host.state.focusedSessionId.listen(evaluate),
       host.state.busyBySession.listen(evaluate),
+      ...[host.state.focusedSessionProfile, host.state.profile, host.state.gateway].filter(Boolean).map(store => store.listen(() => {
+        ctrl.clear(); lastSid = null; evaluate()
+      })),
       installInline(ctrl, accept)
     ]
     evaluate()
@@ -416,6 +469,6 @@ export default {
     ])
     ctx.registerSettingsPage?.({ id: 'neo-composer', title: 'Neo Composer', render: () => jsx(Settings, { ctrl, storage: ctx.storage, files: ctx.files }) })
 
-    ctx.onDispose?.(() => { for (const u of unsubs) u?.() })
+    ctx.onDispose?.(() => { ctrl.clear(); for (const u of unsubs) u?.() })
   }
 }

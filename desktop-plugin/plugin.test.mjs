@@ -33,6 +33,61 @@ globalThis.fetch = async (url, init) => {
 
 const mod = await import('./neo-composer/plugin.js')
 
+test('Hermes mode uses bounded host RPC without service credentials or HTTP fallback', async () => {
+  const calls = []
+  const c = mod.createController({
+    fetchImpl: () => assert.fail('Hermes mode must not call service'),
+    storage: { get: () => ({ backend: 'hermes', token: 'private' }) },
+    request: async (method, params) => {
+      calls.push([method, params])
+      if (method === 'session.history') return { messages: Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: 'x'.repeat(5000) })) }
+      return { suggestion: '下一步', status: 'ready' }
+    }
+  })
+  await c.refresh('s1')
+  assert.equal(c.get().suggestion, '下一步')
+  assert.equal(calls[1][0], 'plugin.neo-composer.predict')
+  assert.equal(calls[1][1].messages.length, 8)
+  assert.equal(calls[1][1].messages[0].content.length, 2800)
+  assert.deepEqual(Object.keys(calls[1][1]).sort(), ['messages', 'session_id'])
+})
+
+test('Hermes mode fails closed on cross-profile and unavailable backend', async () => {
+  const make = context => mod.createController({ context,
+    fetchImpl: () => assert.fail('no silent service fallback'),
+    storage: { get: () => ({ backend: 'hermes' }) },
+    request: async method => {
+      if (method === 'session.history') return [{ role: 'assistant', text: 'done' }]
+      throw new Error('RPC not installed')
+    }
+  })
+  const cross = make(() => ({ profile: 'bot', gatewayProfile: 'default' }))
+  await cross.refresh('s1')
+  assert.match(cross.get().error, /profile/)
+  const missing = make(() => ({}))
+  await missing.refresh('s1')
+  assert.match(missing.get().error, /RPC not installed/)
+})
+
+test('Hermes results are discarded after profile or backend changes', async () => {
+  for (const kind of ['profile', 'backend']) {
+    let release, profile = 'default', backend = 'hermes'
+    const c = mod.createController({
+      context: () => ({ profile, gatewayProfile: profile }),
+      storage: { get: () => ({ backend }) },
+      request: async method => method === 'session.history' ? [{ role: 'assistant', text: 'done' }]
+        : new Promise(resolve => { release = resolve }),
+      fetchImpl: () => assert.fail('network')
+    })
+    const pending = c.refresh('s1')
+    await new Promise(resolve => setImmediate(resolve))
+    if (kind === 'profile') profile = 'other'; else backend = 'service'
+    release({ suggestion: 'stale', status: 'ready' })
+    await pending
+    assert.equal(c.get().suggestion, null)
+  }
+})
+
 test('toServiceMessages keeps user/assistant text only', () => {
   assert.deepEqual(mod.toServiceMessages({ messages: [{ role: 'tool', text: 't' }, { role: 'user', text: ' hi ' }, { role: 'assistant', content: 'yo' }, { role: 'assistant', text: '' }] }),
     [{ role: 'user', content: ' hi ' }, { role: 'assistant', content: 'yo' }])

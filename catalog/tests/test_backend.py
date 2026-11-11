@@ -109,6 +109,24 @@ class CandidateTests(unittest.TestCase):
             'display_name': 'Neo Composer',
             'description': 'Predict the next user message using your chosen Hermes model.'})])
         self.assertIn('suggest', rpcs)
+        self.assertIn('predict', rpcs)
+        with self.assertRaises(ValueError):
+            rpcs['predict']({'messages': ROWS}, session_id=None)
+        model_calls = []
+        def complete(*args, **kwargs):
+            model_calls.append(kwargs)
+            return SimpleNamespace(text='{"suggestion":"Group the findings in a table"}')
+        ctx.llm = SimpleNamespace(complete=complete)
+        with patch.object(plugin, 'Store', return_value=self.store):
+            result = rpcs['predict']({'messages': ROWS, 'provider': 'ignored', 'model': 'ignored'}, session_id='s1')
+            self.assertEqual(result['suggestion'], 'Group the findings in a table')
+            self.assertEqual(result['source'], 'hermes')
+            self.assertEqual(model_calls[0]['task'], 'neo_composer')
+            self.assertNotIn('provider', model_calls[0])
+            self.assertNotIn('model', model_calls[0])
+            self.store.configure(False)
+            self.assertEqual(rpcs['predict']({'messages': ROWS}, session_id='s1')['status'], 'disabled')
+            self.assertEqual(len(model_calls), 1)
         with self.assertRaises(ValueError):
             rpcs['suggest']({}, session_id=None)
 

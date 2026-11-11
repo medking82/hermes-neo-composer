@@ -16,13 +16,15 @@ jobs:
       - name: Service unit tests
         run: cd service && python3 -m unittest -v test_neo_suggest
       - name: Desktop plugin tests
-        run: node --check desktop-plugin/neo-composer/plugin.js && node --test desktop-plugin/plugin.test.mjs
+        run: node --check desktop-plugin/neo-composer/plugin.js && node --test desktop-plugin/*.test.mjs
       - name: Catalog package tests
         run: |
           cd catalog
           python3 -m pip install fastapi httpx
           python3 -m unittest discover -s tests -v
           node --check desktop/plugin.js && node --test tests/plugin.test.mjs
+      - name: Advanced desktop installer tests
+        run: python3 -m unittest discover -s deploy -v
       - name: Python syntax
         run: python3 -m compileall -q service compat catalog
       - name: Shell syntax
